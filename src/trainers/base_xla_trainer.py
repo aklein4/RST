@@ -81,27 +81,32 @@ class BaseXLATrainer:
         with LogSection("Saving Checkpoint"):
 
             api = hf.HfApi()
+
+            # create base checkpoint paths
             tmp_base_path = os.path.join(constants.LOCAL_DATA_PATH, "tmp_checkpoint")
             out_base_path = f"{step:012d}"
 
-            for name, tup in models.items():
-                model, on_device = tup
+            for name, model in models.items():
 
+                # create paths for this model
                 tmp_path = os.path.join(tmp_base_path, name)
                 out_path = os.path.join(out_base_path, name)
 
-                if on_device:
-                    os.makedirs(tmp_path, exist_ok=True)
-                    xm.save(model.state_dict(), os.path.join(tmp_path, "state_dict.pt"))
+                # save in transformers format
+                try:
+                    model.config.save_pretrained(tmp_path, push_to_hub=False)
+                
+                # just save state dict
+                except:
+                    log_master_print(f"Warning: {name} config not saved!")
+                    
                     try:
-                        model.config.save_pretrained(tmp_path, push_to_hub=False)
+                        os.makedirs(tmp_path, exist_ok=True)
+                        xm.save(model.state_dict(), os.path.join(tmp_path, "state_dict.pt"))
                     except:
-                        print(f"Warning: {name} config not saved")
-                        pass
+                        log_master_print(f"ERROR: {name} NOT SAVED!")
 
-                else:
-                    model.save_pretrained(tmp_path, push_to_hub=False)
-
+                # push to hub
                 api.upload_folder(
                     repo_id=self.save_repo,
                     folder_path=tmp_path,
@@ -111,13 +116,16 @@ class BaseXLATrainer:
     
 
     def _get_scheduler(self, optimizer):
+
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=1e-10,
             end_factor=1.0,
             total_iters=self.warmup_steps
         )
-        if self.lr_steps is None:
+
+        if self.lr_steps is None or self.end_lr is None:
+            assert self.lr_steps is None and self.end_lr is None, "Both lr_steps and end_lr must be None or neither!"
             return warmup_scheduler
         
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -140,7 +148,7 @@ class BaseXLATrainer:
 
         # init model
         for p in model.parameters():
-            p.requires_grad = True
+            p.requires_grad_(True)
         model.train()
 
         # init training objs
@@ -156,6 +164,7 @@ class BaseXLATrainer:
         curr_step = 0
         token_tracker = xm.RateTracker()
         step_tracker = xm.RateTracker()
+        self.seen_tokens = 0
         for x, seg_ids in loader:
             assert x.shape == seg_ids.shape, f"Input ({x.shape}) and segment ids ({seg_ids.shape}) must have same shape!"
 
@@ -165,22 +174,30 @@ class BaseXLATrainer:
                 log_print(f"Warning: sample size {n_x} not divisible by mini batch size {self.mini_bs}")
             if n_x * constants.NUM_XLA_DEVICES() != self.bs:
                 log_print(f"Warning: sample size {n_x} with {constants.NUM_XLA_DEVICES()} devices does not match batch size {self.bs}")
+            
             x_split = torch.split(x, self.mini_bs, dim=0)
             seg_split = torch.split(seg_ids, self.mini_bs, dim=0)
 
             # accumulate gradients
             results_accum = DotDict()
             for split_idx in range(len(x_split)):
+
                 mini_x = x_split[split_idx]
                 mini_seg = seg_split[split_idx]
 
                 # get results from train step
                 with autocast(constants.XLA_DEVICE()):
-                    results = self.train_step(model, mini_x, mini_seg, tokenizer)
+                    results = self.train_step(
+                        model,
+                        tokenizer,
+                        mini_x,
+                        mini_seg
+                    )
 
                     # scale results for accumulation
+                    # reductions are done with mean
                     for k, v in results.items():
-                        results[k] = v / (len(x_split) * constants.NUM_XLA_DEVICES())
+                        results[k] = v / len(x_split)
 
                     # save results
                     with torch.no_grad():
@@ -189,6 +206,7 @@ class BaseXLATrainer:
                                 results_accum[k] = 0.0
                             results_accum[k] = results_accum[k] + v.detach()
                 
+                # gradient reduction is done by averaging
                 results.loss.backward()
                 if len(x_split) > 1:
                     xm.mark_step()
@@ -201,17 +219,26 @@ class BaseXLATrainer:
             self.log.lr = lr_scheduler.get_last_lr()[0]
             lr_scheduler.step()
 
-            # tracking
-            token_tracker.add(self.bs * x.shape[1])
+            # step tracking
             step_tracker.add(1)
             curr_step += 1
             self.log.steps_completed = curr_step
 
             def _post_step():
 
+                # token tracking
+                tokens_in_batch = xm.mesh_reduce(
+                    "tokens_batch_reduct",
+                    (x != tokenizer.pad_token_id).int().sum().item(),
+                    np.sum
+                )
+                token_tracker.add(tokens_in_batch)
+                self.seen_tokens += tokens_in_batch
+                self.log.seen_tokens = self.seen_tokens
+
                 # log
                 for k, v in results_accum.items():
-                    r = xm.mesh_reduce(f"{k}_reduce", v.item(), np.sum)
+                    r = xm.mesh_reduce(f"{k}_reduce", v.item(), np.mean)
                     self.log[k] = r
 
                 # print update
@@ -227,34 +254,38 @@ class BaseXLATrainer:
                 # save
                 self.log_step()
                 if curr_step % self.checkpoint_interval == 0:
-                    self.save_checkpoint(
-                        {
-                            'model': (model, True),
-                            'optimizer': (optimizer, True),
-                            'tokenizer': (tokenizer, False)
-                        },
-                        curr_step
-                    )
+                    try:
+                        self.save_checkpoint(
+                            {
+                                'model': model,
+                                'tokenizer': tokenizer,
+                            },
+                            curr_step
+                        )
+                    except:
+                        log_master_print("Warning: checkpoint save failed!")
             
             # add closure
             xm.add_step_closure(_post_step)
 
-        self.save_checkpoint(
-            {
-                'model': (model, True),
-                'optimizer': (optimizer, True),
-                'tokenizer': (tokenizer, False)
-            },
-            curr_step
-        )
+        try:
+            self.save_checkpoint(
+                {
+                    'model': model,
+                    'tokenizer': tokenizer,
+                },
+                curr_step
+            )
+        except:
+            log_master_print("Warning: final checkpoint save failed!")
     
 
     def train_step(
         self,
         model,
+        tokenizer
         x,
         seg_ids,
-        tokenizer
     ):
         """ Get results of a single training step.
          - Must return DotDict of results

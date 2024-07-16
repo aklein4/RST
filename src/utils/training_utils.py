@@ -22,13 +22,16 @@ def loss(
     Returns:
         torch.Tensor: cross-entropy loss [nats]
     """
-    x, logits = x[:, 1:], logits[:, :-1]
+    x = x[:, 1:].view(-1)
+    logits = logits[:, :-1].view(-1, logits.shape[-1])
+    mask = x != ignore_index
 
-    return F.cross_entropy(
-        logits.contiguous().view(-1, logits.shape[-1]),
-        x.contiguous().view(-1),
-        ignore_index=ignore_index
-    )
+    # we assume logits are normalized, to save (quite a bit of) memory
+    loss = -logits[x]
+
+    # mask padding tokens
+    loss = torch.masked_fill(loss, ~mask, 0.0)
+    return loss.sum() / mask.float().sum()
 
 
 @torch.no_grad()

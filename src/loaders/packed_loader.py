@@ -48,8 +48,7 @@ class PackedCollator:
             torch.LongTensor: the data as a long tensor
         """
         stream = io.BytesIO(data)
-        arr = np.lib.format.read_array(stream)
-        return torch.from_numpy(arr.astype(np.int64)).long()
+        return np.lib.format.read_array(stream)
 
 
     def __call__(
@@ -69,10 +68,18 @@ class PackedCollator:
 
         # get list tensors
         input_ids = [x['input_ids.npy'] for x in data]
-        input_ids = [self._load_data(x) for x in input_ids]
-        
+        try:
+            input_ids = [self._load_data(x) for x in input_ids]
+        except:
+            pass
+        input_ids = [torch.from_numpy(arr.astype(np.int64)).long() for arr in input_ids]
+
         seg_ids = [x['segment_ids.npy'] for x in data]
-        seg_ids = [self._load_data(x) for x in seg_ids]
+        try:
+            seg_ids = [self._load_data(x) for x in seg_ids]
+        except:
+            pass
+        seg_ids = [torch.from_numpy(arr.astype(np.int64)).long() for arr in seg_ids]
 
         # pad into single tensor
         out = torch.nn.utils.rnn.pad_sequence(
@@ -174,12 +181,9 @@ def get_packed_loader(
 
     # prepare batch sizes
     if constants.XLA_AVAILABLE:
-        total_mini_bs = mini_bs * constants.NUM_XLA_DEVICES()
-        if bs % total_mini_bs != 0:
-            raise ValueError(f"Batch size {bs} not divisible by total mini batch size {total_mini_bs}")
-        if total_mini_bs > bs:
-            log_print(f"Warning: total mini batch size {total_mini_bs} larger than batch size {bs}")
-        sample_size = mini_bs * (bs // total_mini_bs)
+        if bs % constants.NUM_XLA_DEVICES() != 0:
+            raise ValueError(f"Batch size {bs} not divisible by number of devices {constants.NUM_XLA_DEVICES()}")
+        sample_size = bs // constants.NUM_XLA_DEVICES()
     else:
         sample_size = bs
 
@@ -196,7 +200,7 @@ def get_packed_loader(
         dataset,
         batch_size=sample_size,
         collate_fn=collator,
-        drop_last=True
+        drop_last=True,
     )
 
     if not constants.XLA_AVAILABLE:
