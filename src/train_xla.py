@@ -36,7 +36,7 @@ def _mp_fn(index, args):
     model_config = load_model_config(args.model_config, tokenizer)
     train_config = load_train_config(args.train_config)
 
-    seq_length = model_config["max_position_embeddings"]
+    seq_length = model_config["max_sequence_length"]
     start_seq_ind = train_config.get("start_seq_ind", 0)
     checkpoint = train_config.get("checkpoint", None)
 
