@@ -27,7 +27,8 @@ def loss(
     mask = x != ignore_index
 
     # we assume logits are normalized, to save (quite a bit of) memory
-    loss = -logits[x]
+    ar = torch.arange(x.shape[0], device=x.device, dtype=x.dtype)
+    loss = -logits[ar, x]
 
     # mask padding tokens
     loss = torch.masked_fill(loss, ~mask, 0.0)
