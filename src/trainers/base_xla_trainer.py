@@ -283,7 +283,7 @@ class BaseXLATrainer:
     def train_step(
         self,
         model,
-        tokenizer
+        tokenizer,
         x,
         seg_ids,
     ):
