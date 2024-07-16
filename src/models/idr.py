@@ -34,16 +34,17 @@ class IDRInputNorm(nn.Module):
 
         self.hidden_size = hidden_size
         self.register_size = register_size
+        self.skip_size = hidden_size - register_size
 
         self.register_norm = nn.LayerNorm(register_size, eps=eps)
-        self.skip_norm = nn.LayerNorm(hidden_size, eps=eps)
+        self.skip_norm = nn.LayerNorm(self.skip_size, eps=eps)
 
 
     def forward(self, hidden_states):
         register_states, skip_states = hidden_states.split(
             [
                 self.register_size,
-                self.hidden_size - self.register_size
+                self.skip_size
             ],
             dim=-1
         )
@@ -62,6 +63,7 @@ class IDRSkipNorm(nn.Module):
 
         self.hidden_size = hidden_size
         self.register_size = register_size
+        self.skip_size = hidden_size - register_size
 
         self.register_norm = nn.LayerNorm(register_size, eps=eps)
 
@@ -70,7 +72,7 @@ class IDRSkipNorm(nn.Module):
         register_states, skip_states = hidden_states.split(
             [
                 self.register_size,
-                self.hidden_size - self.register_size
+                self.skip_size
             ],
             dim=-1
         )
@@ -94,7 +96,7 @@ class IDRLayer(nn.Module):
         eps = config.layer_norm_eps
 
         self.attn_input_norm = IDRInputNorm(h, r, eps)
-        self.mlp_input_norm = IDRSkipNorm(h, r, eps)
+        self.mlp_input_norm = IDRInputNorm(h, r, eps)
 
         self.attn_skip_norm = IDRSkipNorm(h, r, eps)
         self.mlp_skip_norm = IDRSkipNorm(h, r, eps)

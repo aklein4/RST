@@ -1,7 +1,7 @@
 
-model_type: base
+model_type: idr
 architectures: [
-    BaseLmModel
+    IDRLmModel
 ]
 
 max_sequence_length: 1024
@@ -17,6 +17,8 @@ hidden_act: silu
 
 initializer_range: 0.02
 layer_norm_eps: 0.00001
+
+register_size: 384
 
 ignore_segment_ids: true
 gradient_checkpointing: False
