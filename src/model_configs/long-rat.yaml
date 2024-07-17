@@ -24,5 +24,5 @@ residual_multiplier: 4
 residual_groups: 32
 rat_norm_eps: 0.00001
 
-ignore_segment_ids: false
+ignore_segment_ids: true
 gradient_checkpointing: false
