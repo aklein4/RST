@@ -1,7 +1,7 @@
 """ Models """
 
 # from models.base import BaseConfig, BaseLmModel
-from models.og_base import BaseConfig, BaseLmModel
+from models.base import BaseConfig, BaseLmModel
 from models.rat import RatConfig, RatLmModel
 
 CONFIG_DICT = {
