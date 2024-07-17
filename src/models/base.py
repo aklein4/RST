@@ -208,13 +208,13 @@ class BaseMLP(nn.Module):
 class BaseLayer(nn.Module):
     
     
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             self.attn.o_proj.weight.data.zero_()
             self.mlp.down_proj.weight.data.zero_()
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
         pass
 
@@ -264,12 +264,12 @@ class BaseTransformer(nn.Module):
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config: BaseConfig):
         for layer in self.layers:
             layer._special_init_weights(config)
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
         for layer in self.layers:
             layer.post_step()
@@ -293,7 +293,7 @@ class BaseTransformer(nn.Module):
         self.gradient_checkpointing = False
 
     
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _get_mask(
         self,
         input_ids: torch.LongTensor,
@@ -323,10 +323,10 @@ class BaseTransformer(nn.Module):
         # head dim
         mask = mask.unsqueeze(1)
 
-        return mask
+        return mask.detach()
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _get_position_ids(
         self,
         input_ids: torch.LongTensor,
@@ -342,7 +342,7 @@ class BaseTransformer(nn.Module):
         if len(position_ids.shape) == 1:
             position_ids = position_ids.unsqueeze(0)
 
-        return position_ids
+        return position_ids.detach()
 
 
     def get_hidden_states(
@@ -416,11 +416,11 @@ class BaseLmModel(XLAModel):
             module.weight.data.normal_(mean=0.0, std=std)
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self):
         self.model._special_init_weights(self.config)
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
         self.model.post_step()
 

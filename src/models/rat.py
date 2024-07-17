@@ -33,20 +33,20 @@ class RatConfig(BaseConfig):
 class RatInput(nn.Module):
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config):
         self.conv.weight.data.normal_()
-        self.conv.weight.data /= (
-            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
-            config.rat_norm_eps
-        )
+        self.post_step()
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
-        self.conv.weight.data /= (
-            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
-            self.rat_norm_eps
-        )
+        self.conv.weight.data[:] = (
+            self.conv.weight.data / 
+            (
+                self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
+                self.rat_norm_eps
+            )
+        ).detach()
 
 
     def __init__(self, config: RatConfig, num_outputs):
@@ -100,29 +100,18 @@ class RatInput(nn.Module):
 
 class RatOutput(nn.Module):
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config):
         self.conv.weight.data.normal_()
-
-        pieces = self.conv.weight.data.chunk(self.residual_groups, dim=0)
-        pieces = torch.stack(pieces, dim=-1)
-        pieces /= (
-            pieces.norm(p=2, dim=0, keepdim=True) +
-            config.rat_norm_eps
-        )
-
-        pieces = pieces.chunk(self.residual_groups, dim=-1)
-        pieces = torch.cat(pieces, dim=0).squeeze(-1)
-
-        self.conv.weight.data[:] = pieces
+        self.post_step()
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
 
         pieces = self.conv.weight.data.chunk(self.residual_groups, dim=0)
         pieces = torch.stack(pieces, dim=-1)
-        pieces /= (
+        pieces = pieces / (
             pieces.norm(p=2, dim=0, keepdim=True) +
             self.rat_norm_eps
         )
@@ -130,7 +119,7 @@ class RatOutput(nn.Module):
         pieces = pieces.chunk(self.residual_groups, dim=-1)
         pieces = torch.cat(pieces, dim=0).squeeze(-1)
 
-        self.conv.weight.data[:] = pieces
+        self.conv.weight.data[:] = pieces.detach()
 
 
     def __init__(self, config):
@@ -203,7 +192,7 @@ class RatMLP(BaseMLP):
 
 class RatLayer(nn.Module):
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             self.attn.o_proj.weight.data.zero_()
@@ -216,7 +205,7 @@ class RatLayer(nn.Module):
         self.mlp_output._special_init_weights(config)
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
         
         self.attn_input.post_step()
@@ -275,7 +264,7 @@ class RatTransformer(BaseTransformer):
         self.norm = RatInput(config, 1)
 
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def _special_init_weights(self, config):
         super()._special_init_weights(config)
 
@@ -283,7 +272,7 @@ class RatTransformer(BaseTransformer):
         self.norm._special_init_weights(config)
     
 
-    @torch.no_grad()
+    # @ torch.no_grad()()
     def post_step(self):
         super().post_step()
 
