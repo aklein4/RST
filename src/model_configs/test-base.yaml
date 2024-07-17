@@ -22,5 +22,5 @@ rope_base: 10000
 initializer_range: 0.02
 identity_init: false
 
-ignore_segment_ids: false
+ignore_segment_ids: true
 gradient_checkpointing: false
