@@ -37,15 +37,15 @@ class RatInput(nn.Module):
     def _special_init_weights(self, config):
         self.conv.weight.data.normal_()
         self.conv.weight.data /= (
-            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) # +
-            # config.rat_norm_eps
+            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
+            config.rat_norm_eps
         )
 
     @torch.no_grad()
     def post_step(self):
         self.conv.weight.data /= (
-            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) # +
-            # self.rat_norm_eps
+            self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
+            self.rat_norm_eps
         )
 
 
@@ -107,8 +107,8 @@ class RatOutput(nn.Module):
         pieces = self.conv.weight.data.chunk(self.residual_groups, dim=0)
         pieces = torch.stack(pieces, dim=-1)
         pieces /= (
-            pieces.norm(p=2, dim=0, keepdim=True) # +
-            # config.rat_norm_eps
+            pieces.norm(p=2, dim=0, keepdim=True) +
+            config.rat_norm_eps
         )
 
         pieces = pieces.chunk(self.residual_groups, dim=-1)
@@ -123,8 +123,8 @@ class RatOutput(nn.Module):
         pieces = self.conv.weight.data.chunk(self.residual_groups, dim=0)
         pieces = torch.stack(pieces, dim=-1)
         pieces /= (
-            pieces.norm(p=2, dim=0, keepdim=True) # +
-            # self.rat_norm_eps
+            pieces.norm(p=2, dim=0, keepdim=True) +
+            self.rat_norm_eps
         )
 
         pieces = pieces.chunk(self.residual_groups, dim=-1)
@@ -303,3 +303,9 @@ class RatTransformer(BaseTransformer):
 
 class RatLmModel(BaseLmModel):
     transformer_type = RatTransformer
+
+    def post_step():
+        pass
+
+    def _special_init_weights(self):
+        pass
