@@ -1,7 +1,7 @@
 
-model_type: base
+model_type: rat
 architectures: [
-    BaseLmModel
+    RatLmModel
 ]
 
 max_sequence_length: 1024
@@ -9,7 +9,7 @@ max_sequence_length: 1024
 hidden_size: 512
 mlp_size: 1280
 
-num_layers: 48
+num_layers: 44
 num_attention_heads: 8
 
 use_qkv_bias: true
@@ -19,6 +19,10 @@ rope_base: 10000
 
 initializer_range: 0.02
 identity_init: true
+
+residual_multiplier: 4
+residual_groups: 32
+rat_norm_eps: 0.00001
 
 ignore_segment_ids: false
 gradient_checkpointing: False
