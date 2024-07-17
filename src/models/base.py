@@ -149,7 +149,7 @@ class BaseAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # apply rope
-        # query_states, key_states = self.rope(query_states, key_states, position_ids)
+        query_states, key_states = self.rope(query_states, key_states, position_ids)
 
         # update/apply cache
         if past_key_value is not None:
@@ -161,8 +161,8 @@ class BaseAttention(nn.Module):
         is_causal = True if attention_mask is None and q_len > 1 else False
 
         attn_output = F.scaled_dot_product_attention(
-            query_states.contiguous(),
-            key_states.contiguous(),
+            query_states.contiguous().to(value_states.dtype),
+            key_states.contiguous().to(value_states.dtype),
             value_states.contiguous(),
             attn_mask=attention_mask,
             dropout_p=0.0,
