@@ -39,9 +39,11 @@ class RotaryEmbedding(nn.Module):
         self.cos_emb.weight.data = cos.contiguous()
 
 
-    @torch.no_grad()
     def _get_sin_cos(self, position_ids):
-        return self.sin_emb(position_ids).detach(), self.cos_emb(position_ids).detach()
+        return (
+            self.sin_emb(position_ids).detach(),
+            self.cos_emb(position_ids).detach()
+        )
 
 
     def _rotate_half(self, x):
