@@ -21,4 +21,4 @@ initializer_range: 0.02
 identity_init: true
 
 ignore_segment_ids: false
-gradient_checkpointing: true
+gradient_checkpointing: false
