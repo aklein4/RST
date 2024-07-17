@@ -52,10 +52,10 @@ class XLAModel(PreTrainedModel):
                 log_print(f"Gradient checkpointing enabled for {module.__class__.__name__}: {module.gradient_checkpointing}")
 
 
-    def __init__(self, *args, fast_start=False, **kwargs):
-        super().__init__(*args, **kwargs)
+    # def __init__(self, *args, fast_start=False, **kwargs):
+    #     super().__init__(*args, **kwargs)
 
-        self._fast_start = fast_start
+    #     self._fast_start = fast_start
 
 
     # def init_weights(self):
