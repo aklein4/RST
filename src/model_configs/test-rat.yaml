@@ -24,4 +24,4 @@ residual_groups: 16
 rat_norm_eps: 0.00001
 
 ignore_segment_ids: false
-gradient_checkpointing: False
+gradient_checkpointing: false
