@@ -18,7 +18,7 @@ def main():
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     
     x = tokenizer(["Hello, my dog is cute", "His dog is cute too", "All dogs are cute"], return_tensors="pt", padding="max_length", max_length=16).input_ids
-    seg_ids = torch.randint_like(x, 4)
+    seg_ids = None # torch.randint_like(x, 4)
 
     print("loading model...")
     config = load_model_config(MODEL_CONFIG, tokenizer)
@@ -27,7 +27,7 @@ def main():
     out = model(x, segment_ids=seg_ids)
     out_noseg = model(x)
 
-    print(out)
+    # print(out)
     print(out.shape)
     print((out - out_noseg).abs().max().item())
 

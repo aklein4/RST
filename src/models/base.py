@@ -150,7 +150,6 @@ class BaseAttention(nn.Module):
 
         # apply rope
         query_states, key_states = self.rope(query_states, key_states, position_ids)
-        value_states = value_states.to(query_states.dtype)
 
         # update/apply cache
         if past_key_value is not None:
