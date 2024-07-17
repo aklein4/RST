@@ -19,5 +19,5 @@ layer_norm_eps: 0.00001
 initializer_range: 0.02
 identity_init: true
 
-ignore_segment_ids: true
-gradient_checkpointing: False
+ignore_segment_ids: false
+gradient_checkpointing: false
