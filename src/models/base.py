@@ -127,11 +127,11 @@ class BaseAttention(nn.Module):
         self._init_qkv_proj(config)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
-        # self.rope = RotaryEmbedding(
-        #     self.head_dim, config.rope_fraction,
-        #     config.max_sequence_length,
-        #     config.rope_base
-        # )
+        self.rope = RotaryEmbedding(
+            self.head_dim, config.rope_fraction,
+            config.max_sequence_length,
+            config.rope_base
+        )
 
 
     def _init_qkv_proj(self, config):
@@ -158,34 +158,20 @@ class BaseAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # apply rope
-        # query_states, key_states = self.rope(query_states, key_states, position_ids)
+        query_states, key_states = self.rope(query_states, key_states, position_ids)
 
         # update/apply cache
         if past_key_value is not None:
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
 
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-        is_causal = True if attention_mask is None and q_len > 1 else False
-
-        attn_output = F.scaled_dot_product_attention(
-            query_states.contiguous(),
-            key_states.contiguous(),
-            value_states.contiguous(),
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
-        )
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
-        # if attention_mask is not None:
-        #     attn_weights = attn_weights + attention_mask
+        attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
 
-        # attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
-
-        # attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -222,15 +208,15 @@ class BaseMLP(nn.Module):
 class BaseLayer(nn.Module):
     
     
-    # @torch.no_grad()
-    # def _special_init_weights(self, config: BaseConfig):
-    #     if config.identity_init:
-    #         self.attn.o_proj.weight.data.zero_()
-    #         self.mlp.down_proj.weight.data.zero_()
+    @torch.no_grad()
+    def _special_init_weights(self, config: BaseConfig):
+        if config.identity_init:
+            self.attn.o_proj.weight.data.zero_()
+            self.mlp.down_proj.weight.data.zero_()
 
-    # @torch.no_grad()
-    # def post_step(self):
-    #     pass
+    @torch.no_grad()
+    def post_step(self):
+        pass
 
 
     def __init__(self, config: BaseConfig, layer_idx: int):
@@ -278,15 +264,15 @@ class BaseTransformer(nn.Module):
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
 
-    # @torch.no_grad()
-    # def _special_init_weights(self, config: BaseConfig):
-    #     for layer in self.layers:
-    #         layer._special_init_weights(config)
+    @torch.no_grad()
+    def _special_init_weights(self, config: BaseConfig):
+        for layer in self.layers:
+            layer._special_init_weights(config)
 
-    # @torch.no_grad()
-    # def post_step(self):
-    #     for layer in self.layers:
-    #         layer.post_step()
+    @torch.no_grad()
+    def post_step(self):
+        for layer in self.layers:
+            layer.post_step()
 
 
     def __init__(self, config: BaseConfig):
@@ -298,7 +284,6 @@ class BaseTransformer(nn.Module):
 
         # weights
         self.vocab_embs = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
         self.layers = nn.ModuleList(
             [self.layer_type(config, layer_idx) for layer_idx in range(config.num_layers)]
         )
@@ -316,10 +301,6 @@ class BaseTransformer(nn.Module):
     ) -> torch.BoolTensor:
         batch_size, seq_length = input_ids.shape
 
-        # causal handled by sdpa
-        if segment_ids is None:
-            return None
-
         # default eager causal mask
         mask = torch.ones(seq_length, seq_length, dtype=torch.bool, device=input_ids.device)
         mask = torch.triu(mask, diagonal=1)
@@ -332,13 +313,12 @@ class BaseTransformer(nn.Module):
             segment_mask = segment_ids[:, None, :] != segment_ids[:, :, None]
             mask = mask | segment_mask            
 
-        mask = ~mask
-        # # fill with -infs
-        # mask = torch.masked_fill(
-        #     torch.zeros_like(mask).float(),
-        #     mask,
-        #     float('-inf')
-        # )
+        # fill with -infs
+        mask = torch.masked_fill(
+            torch.zeros_like(mask).float(),
+            mask,
+            float('-inf')
+        )
 
         # head dim
         mask = mask.unsqueeze(1)
@@ -370,11 +350,7 @@ class BaseTransformer(nn.Module):
         input_ids: torch.LongTensor,
         position_ids: torch.LongTensor
     ) -> torch.Tensor:
-        
-        hidden_states = self.vocab_embs(input_ids)
-        hidden_states = hidden_states + self.pos_embs(position_ids)
-
-        return hidden_states
+        return self.vocab_embs(input_ids)
 
 
     def forward(
@@ -440,13 +416,13 @@ class BaseLmModel(XLAModel):
             module.weight.data.normal_(mean=0.0, std=std)
 
 
-    # @torch.no_grad()
-    # def _special_init_weights(self):
-    #     self.model._special_init_weights(self.config)
+    @torch.no_grad()
+    def _special_init_weights(self):
+        self.model._special_init_weights(self.config)
 
-    # @torch.no_grad()
-    # def post_step(self):
-    #     self.model.post_step()
+    @torch.no_grad()
+    def post_step(self):
+        self.model.post_step()
 
 
     def __init__(self, config: BaseConfig, fast_start=False):
