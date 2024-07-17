@@ -36,6 +36,7 @@ class XLAModel(PreTrainedModel):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
+
     # converted from torch to torch xla
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={}):
         if not self.supports_gradient_checkpointing:
@@ -45,3 +46,25 @@ class XLAModel(PreTrainedModel):
         self._set_gradient_checkpointing(enable=True, gradient_checkpointing_func=gradient_checkpointing_func)
         
         log_print(f"Gradient checkpointing enabled for {self.__class__.__name__}: {self.gradient_checkpointing}")
+
+
+    def __init__(self, *args, fast_start=False, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._fast_start = fast_start
+
+
+    def init_weights(self):
+        if self._fast_start:
+            return
+
+        super().init_weights()
+        self._special_init_weights()
+
+
+    def _special_init_weights(self):
+        pass
+
+    
+    def post_step(self):
+        pass

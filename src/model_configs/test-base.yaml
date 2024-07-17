@@ -14,9 +14,10 @@ num_attention_heads: 2
 
 use_qkv_bias: true
 hidden_act: silu
+layer_norm_eps: 0.00001
 
 initializer_range: 0.02
-layer_norm_eps: 0.00001
+identity_init: true
 
 ignore_segment_ids: true
 gradient_checkpointing: False
