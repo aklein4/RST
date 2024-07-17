@@ -4,13 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-    USE_SDPA_BACKEND = True
-except:
-    print("Warning: SDPA backend not found", flush=True)
-    USE_SDPA_BACKEND = False
-
 import numpy as np
 
 from transformers.cache_utils import Cache
@@ -176,18 +169,22 @@ class BaseAttention(nn.Module):
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         is_causal = True if attention_mask is None and q_len > 1 else False
 
-        if USE_SDPA_BACKEND:
-            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                print("Using Flash Attention!", flush=True)
-                attn_output = F.scaled_dot_product_attention(
+        if hidden_states.dtype != "cpu":
+            print(
+                torch.backends.cuda.can_use_flash_attention(
                     query_states.contiguous().to(value_states.dtype),
                     key_states.contiguous().to(value_states.dtype),
                     value_states.contiguous(),
                     attn_mask=attention_mask,
                     dropout_p=0.0,
                     is_causal=is_causal,
-                )
-        else:
+                    debug=True,
+                ),
+                flush=True,
+            )
+        return hidden_states
+
+        if True:
             attn_output = F.scaled_dot_product_attention(
                 query_states.contiguous().to(value_states.dtype),
                 key_states.contiguous().to(value_states.dtype),
