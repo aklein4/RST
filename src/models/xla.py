@@ -62,9 +62,11 @@ class XLAModel(PreTrainedModel):
         self._special_init_weights()
 
 
+    @torch.no_grad()
     def _special_init_weights(self):
         pass
 
     
+    @torch.no_grad()
     def post_step(self):
         pass

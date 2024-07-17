@@ -10,6 +10,7 @@ from transformers.activations import ACT2FN
 from models.xla import XLAConfig, XLAModel
 from utils.model_utils import RotaryEmbedding
 
+
 class BaseConfig(XLAConfig):
     """
     Base configuration class for experiments.
@@ -158,16 +159,16 @@ class BaseAttention(nn.Module):
         is_causal = True if attention_mask is None and q_len > 1 else False
 
         attn_output = F.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
+            query_states.contiguous(),
+            key_states.contiguous(),
+            value_states.contiguous(),
             attn_mask=attention_mask,
             dropout_p=0.0,
             is_causal=is_causal,
         )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.transpose(1, 2)
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         return self.o_proj(attn_output)
 
@@ -201,11 +202,13 @@ class BaseMLP(nn.Module):
 class BaseLayer(nn.Module):
     
     
+    @torch.no_grad()
     def _special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             self.attn.o_proj.weight.data.zero_()
             self.mlp.down_proj.weight.data.zero_()
 
+    @torch.no_grad()
     def post_step(self):
         pass
 
@@ -252,13 +255,15 @@ class BaseTransformer(nn.Module):
 
     layer_type = BaseLayer
     def get_norm(self, config):
-        return nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
 
+    @torch.no_grad()
     def _special_init_weights(self, config: BaseConfig):
         for layer in self.layers:
             layer._special_init_weights(config)
 
+    @torch.no_grad()
     def post_step(self):
         for layer in self.layers:
             layer.post_step()
@@ -276,7 +281,7 @@ class BaseTransformer(nn.Module):
         self.layers = nn.ModuleList(
             [self.layer_type(config, layer_idx) for layer_idx in range(config.num_layers)]
         )
-        self.norm = self.get_norm(config)
+        self.get_norm(config)
 
         # Compute configuration
         self.gradient_checkpointing = False
@@ -401,10 +406,11 @@ class BaseLmModel(XLAModel):
             module.weight.data.normal_(mean=0.0, std=std)
 
 
-    # special init
+    @torch.no_grad()
     def _special_init_weights(self):
         self.model._special_init_weights(self.config)
 
+    @torch.no_grad()
     def post_step(self):
         self.model.post_step()
 
