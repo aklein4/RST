@@ -11,6 +11,7 @@ from transformers.activations import ACT2FN
 
 from models.xla import XLAConfig, XLAModel
 from utils.model_utils import RotaryEmbedding
+from utils.logging_utils import log_print
 
 
 class BaseConfig(XLAConfig):
@@ -169,19 +170,17 @@ class BaseAttention(nn.Module):
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         is_causal = True if attention_mask is None and q_len > 1 else False
 
-        if hidden_states.dtype != "cpu":
-            print(
-                torch.backends.cuda.can_use_flash_attention(
-                    query_states.contiguous().to(value_states.dtype),
-                    key_states.contiguous().to(value_states.dtype),
-                    value_states.contiguous(),
-                    attn_mask=attention_mask,
-                    dropout_p=0.0,
-                    is_causal=is_causal,
-                    debug=True,
-                ),
-                flush=True,
+        log_print(
+            torch.backends.cuda.can_use_flash_attention(
+                query_states.contiguous().to(value_states.dtype),
+                key_states.contiguous().to(value_states.dtype),
+                value_states.contiguous(),
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=is_causal,
+                debug=True,
             )
+        )
         return hidden_states
 
         if True:
