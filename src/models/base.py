@@ -175,9 +175,9 @@ class BaseAttention(nn.Module):
                 query_states.contiguous().to(value_states.dtype),
                 key_states.contiguous().to(value_states.dtype),
                 value_states.contiguous(),
-                attn_mask=attention_mask,
-                dropout_p=0.0,
-                is_causal=is_causal,
+                attention_mask,
+                0.0,
+                is_causal,
                 debug=True,
             )
         )
