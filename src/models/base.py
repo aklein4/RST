@@ -318,12 +318,13 @@ class BaseTransformer(nn.Module):
             segment_mask = segment_ids[:, None, :] != segment_ids[:, :, None]
             mask = mask | segment_mask            
 
-        # fill with -infs
-        mask = torch.masked_fill(
-            torch.zeros_like(mask).float(),
-            mask,
-            float('-inf')
-        )
+        mask = ~mask
+        # # fill with -infs
+        # mask = torch.masked_fill(
+        #     torch.zeros_like(mask).float(),
+        #     mask,
+        #     float('-inf')
+        # )
 
         # head dim
         mask = mask.unsqueeze(1)
