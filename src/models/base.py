@@ -172,9 +172,14 @@ class BaseAttention(nn.Module):
 
         log_print(
             torch.backends.cuda.can_use_flash_attention(
-                query_states.contiguous().to(value_states.dtype),
-                key_states.contiguous().to(value_states.dtype),
-                value_states.contiguous(),
+                torch.backends.cuda.SDPAParams(
+                    query_states.contiguous().to(value_states.dtype),
+                    key_states.contiguous().to(value_states.dtype),
+                    value_states.contiguous(),
+                    attention_mask,
+                    0.0,
+                    is_causal,
+                ),
                 debug=True,
             )
         )
