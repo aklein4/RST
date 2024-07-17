@@ -157,6 +157,9 @@ class BaseAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
         attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
 
         attn_output = torch.matmul(attn_weights, value_states)
