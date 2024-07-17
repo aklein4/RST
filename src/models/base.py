@@ -397,6 +397,14 @@ class BaseLmModel(XLAModel):
             if module.bias is not None:
                 module.bias.data.zero_()
 
+        elif isinstance(module, (nn.Conv1d, nn.Conv2d)):
+            module.weight.data.normal_(mean=0.0, std=std)
+            module.weight.data[:] = module.weight.data.float()
+
+            if module.bias is not None:
+                module.bias.data.zero_()
+                module.bias.data[:] = module.bias.data.float()
+
         elif isinstance(module, nn.Embedding):
             module.weight.data.normal_(mean=0.0, std=std)
 

@@ -303,9 +303,3 @@ class RatTransformer(BaseTransformer):
 
 class RatLmModel(BaseLmModel):
     transformer_type = RatTransformer
-
-    def post_step():
-        pass
-
-    def _special_init_weights(self):
-        pass
