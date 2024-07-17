@@ -306,6 +306,10 @@ class BaseTransformer(nn.Module):
     ) -> torch.BoolTensor:
         batch_size, seq_length = input_ids.shape
 
+        # causal handled by sdpa
+        if segment_ids is None:
+            return None
+
         # default eager causal mask
         mask = torch.ones(seq_length, seq_length, dtype=torch.bool, device=input_ids.device)
         mask = torch.triu(mask, diagonal=1)

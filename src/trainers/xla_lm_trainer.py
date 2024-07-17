@@ -14,8 +14,9 @@ class XLALMTrainer(BaseXLATrainer):
         out = model(x, segment_ids=seg_ids)
         ignore_index = tokenizer.pad_token_id
 
-        eos_index = None
         if model.ignore_segment_ids:
+            eos_index = None
+        else:
             eos_index = tokenizer.eos_token_id
 
         results = DotDict(
