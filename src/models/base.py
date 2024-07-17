@@ -158,7 +158,7 @@ class BaseAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # apply rope
-        query_states, key_states = self.rope(query_states, key_states, position_ids)
+        # query_states, key_states = self.rope(query_states, key_states, position_ids)
 
         # update/apply cache
         if past_key_value is not None:
@@ -284,6 +284,7 @@ class BaseTransformer(nn.Module):
 
         # weights
         self.vocab_embs = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
         self.layers = nn.ModuleList(
             [self.layer_type(config, layer_idx) for layer_idx in range(config.num_layers)]
         )
@@ -350,7 +351,8 @@ class BaseTransformer(nn.Module):
         input_ids: torch.LongTensor,
         position_ids: torch.LongTensor
     ) -> torch.Tensor:
-        return self.vocab_embs(input_ids)
+        hidden_states = self.vocab_embs(input_ids)
+        return hidden_states + self.pos_embs(position_ids)
 
 
     def forward(

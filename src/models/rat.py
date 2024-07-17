@@ -261,6 +261,7 @@ class RatTransformer(BaseTransformer):
 
     def get_norm(self, config):
         self.proj_in = RatOutput(config)
+        self.pos_in = RatOutput(config)
         self.norm = RatInput(config, 1)
 
 
@@ -269,6 +270,7 @@ class RatTransformer(BaseTransformer):
         super()._special_init_weights(config)
 
         self.proj_in._special_init_weights(config)
+        self.pos_in._special_init_weights(config)
         self.norm._special_init_weights(config)
     
 
@@ -277,6 +279,7 @@ class RatTransformer(BaseTransformer):
         super().post_step()
 
         self.proj_in.post_step()
+        self.pos_in.post_step()
         self.norm.post_step()
 
     
@@ -285,9 +288,13 @@ class RatTransformer(BaseTransformer):
         input_ids: torch.LongTensor,
         position_ids: torch.LongTensor
     ) -> torch.Tensor:
-        hidden_states = super().get_hidden_states(input_ids, position_ids)
+        tokens = self.vocab_embs(input_ids)
+        pos = self.pos_embs(position_ids)
 
-        return self.proj_in(hidden_states)
+        return (
+            self.proj_in(tokens) +
+            self.pos_in(pos)
+        )
 
 
 class RatLmModel(BaseLmModel):
