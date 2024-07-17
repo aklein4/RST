@@ -9,7 +9,7 @@ max_sequence_length: 1024
 hidden_size: 768
 mlp_size: 2048
 
-num_layers: 20
+num_layers: 18
 num_attention_heads: 12
 
 use_qkv_bias: true
