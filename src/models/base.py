@@ -164,14 +164,19 @@ class BaseAttention(nn.Module):
         if past_key_value is not None:
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+        is_causal = True if attention_mask is None and q_len > 1 else False
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
-
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = F.scaled_dot_product_attention(
+            query_states.contiguous().to(value_states.dtype),
+            key_states.contiguous().to(value_states.dtype),
+            value_states.contiguous(),
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
 
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -301,6 +306,10 @@ class BaseTransformer(nn.Module):
     ) -> torch.BoolTensor:
         batch_size, seq_length = input_ids.shape
 
+        # sdpa handles None as causal
+        if segment_ids is None:
+            return None
+
         # default eager causal mask
         mask = torch.ones(seq_length, seq_length, dtype=torch.bool, device=input_ids.device)
         mask = torch.triu(mask, diagonal=1)
@@ -309,16 +318,12 @@ class BaseTransformer(nn.Module):
         mask = mask.unsqueeze(0)
 
         # apply segment ids
-        if segment_ids is not None:
-            segment_mask = segment_ids[:, None, :] != segment_ids[:, :, None]
-            mask = mask | segment_mask            
+        segment_mask = segment_ids[:, None, :] != segment_ids[:, :, None]
+        mask = mask | segment_mask            
 
-        # fill with -infs
-        mask = torch.masked_fill(
-            torch.zeros_like(mask).float(),
-            mask,
-            float('-inf')
-        )
+        # sdpa uses True = NOT masked
+        # https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+        mask = ~mask
 
         # head dim
         mask = mask.unsqueeze(1)
