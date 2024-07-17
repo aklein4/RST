@@ -87,7 +87,6 @@ class RatInput(nn.Module):
             hidden_states
             .view(bs, l, self.hidden_size, self.num_outputs)
             .permute(0, 1, 3, 2)
-            .contiguous()
         )
 
         # apply norm
@@ -199,8 +198,7 @@ class RatMLP(BaseMLP):
         hidden_states = self.in_proj(hidden_states)
         hidden_states = hidden_states.view(bs, l, 2 * self.mlp_size)
 
-        gate, h = hidden_states.chunk(2, dim=-1)
-        return gate.contiguous(), h.contiguous()
+        return hidden_states.chunk(2, dim=-1)
 
 
 class RatLayer(nn.Module):

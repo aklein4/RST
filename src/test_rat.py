@@ -10,10 +10,10 @@ from utils.config_utils import load_model_config
 import utils.constants as constants
 
 
-MODEL_CONFIG = 'long-rat'
+MODEL_CONFIG = 'test-rat'
 BASE_CONFIG = 'long-base'
 
-COMPARE = True
+COMPARE = False
 
 
 def main():
