@@ -155,14 +155,28 @@ class BaseAttention(nn.Module):
         if past_key_value is not None:
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
 
+        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+        is_causal = True if attention_mask is None and q_len > 1 else False
+
+        attn_output = F.scaled_dot_product_attention(
+            query_states.contiguous(),
+            key_states.contiguous(),
+            value_states.contiguous(),
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
+
         # upcast attention to fp32
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+        # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3) / np.sqrt(self.head_dim))
+        # if attention_mask is not None:
+        #     attn_weights = attn_weights + attention_mask
 
-        attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
+        # attn_weights = nn.functional.softmax(attn_weights, dtype=torch.float32, dim=-1).to(query_states.dtype)
 
-        attn_output = torch.matmul(attn_weights, value_states)
+        # attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
