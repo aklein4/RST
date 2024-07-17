@@ -58,19 +58,19 @@ class XLAModel(PreTrainedModel):
         self._fast_start = fast_start
 
 
-    def init_weights(self):
-        if self._fast_start:
-            return
+    # def init_weights(self):
+    #     if self._fast_start:
+    #         return
 
-        super().init_weights()
-        self._special_init_weights()
+    #     super().init_weights()
+    #     self._special_init_weights()
 
 
-    @torch.no_grad()
-    def _special_init_weights(self):
-        pass
+    # @torch.no_grad()
+    # def _special_init_weights(self):
+    #     pass
 
     
-    @torch.no_grad()
+    # @torch.no_grad()
     def post_step(self):
         pass
