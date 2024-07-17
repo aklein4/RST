@@ -215,6 +215,9 @@ class BaseXLATrainer:
             xm.optimizer_step(optimizer)
             optimizer.zero_grad(set_to_none=True)
             
+            # apply post processing to the model
+            model.post_step()
+
             # update lr
             self.log.lr = lr_scheduler.get_last_lr()[0]
             lr_scheduler.step()

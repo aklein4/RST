@@ -8,7 +8,8 @@ import torch.nn.functional as F
 def loss(
     logits: torch.Tensor,
     x: torch.LongTensor,
-    ignore_index: Optional[int]=-1
+    ignore_index: Optional[int]=-1,
+    eos_index: Optional[int]=None
 ) -> torch.Tensor:
     """ Standard cross-entropy loss for language modeling.
      - applies offset so that logits_{t} predicts x_{t+1}
@@ -22,9 +23,13 @@ def loss(
     Returns:
         torch.Tensor: cross-entropy loss [nats]
     """
+    x_inp = x[:, :-1].view(-1)
     x = x[:, 1:].view(-1)
     logits = logits[:, :-1].view(-1, logits.shape[-1])
+    
     mask = x != ignore_index
+    if eos_index is not None:
+        mask = mask & (x_inp != eos_index)
 
     # we assume logits are normalized, to save (quite a bit of) memory
     ar = torch.arange(x.shape[0], device=x.device, dtype=x.dtype)
@@ -39,7 +44,8 @@ def loss(
 def ppl(
     logits: torch.Tensor,
     x: torch.LongTensor,
-    ignore_index: Optional[int]=-1
+    ignore_index: Optional[int]=-1,
+    eos_index: Optional[int]=None
 ) -> torch.Tensor:
     """ Compute perplexity of the model.
      - uses same data logic as loss()
@@ -52,9 +58,13 @@ def ppl(
     Returns:
         torch.Tensor: Perplexity [nats]
     """
+    x_inp = x[:, :-1]
     x = x[:, 1:]
     logits = logits[:, :-1]
+
     mask = x != ignore_index
+    if eos_index is not None:
+        mask = mask & (x_inp != eos_index)
 
     logp = -F.cross_entropy(
         logits.contiguous().view(-1, logits.shape[-1]),
@@ -72,7 +82,8 @@ def ppl(
 def acc(
     logits: torch.Tensor,
     x: torch.LongTensor,
-    ignore_index: Optional[int]=-1
+    ignore_index: Optional[int]=-1,
+    eos_index: Optional[int]=None
 ) -> torch.Tensor:
     """ Compute top-1 next-token accuracy of the model.
      - uses same data logic as loss()
@@ -85,8 +96,12 @@ def acc(
     Returns:
         torch.Tensor: top-1 token accuracy
     """
+    x_inp = x[:, :-1]
     x, logits = x[:, 1:], logits[:, :-1]
+
     mask = x != ignore_index
+    if eos_index is not None:
+        mask = mask & (x_inp != eos_index)
 
     corr = torch.logical_and(
         logits.argmax(-1) == x,
@@ -99,7 +114,8 @@ def acc(
 def pcorr(
     logits: torch.Tensor,
     x: torch.LongTensor,
-    ignore_index: Optional[int]=-1
+    ignore_index: Optional[int]=-1,
+    eos_index: Optional[int]=None
 ) -> torch.Tensor:
     """ Compute token prediction probability of the model.
      - measures probability that a token sampled from logits is equal to target token
@@ -113,9 +129,13 @@ def pcorr(
     Returns:
         torch.Tensor: next-token prediction probability
     """
+    x_inp = x[:, :-1].view(-1)
     x = x[:, 1:].contiguous().view(-1)
     logits = logits[:, :-1].contiguous().view(-1, logits.shape[-1])
+    
     mask = x != ignore_index
+    if eos_index is not None:
+        mask = mask & (x_inp != eos_index)
 
     logp = -F.cross_entropy(
         logits, x,
