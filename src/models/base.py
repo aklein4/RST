@@ -178,6 +178,7 @@ class BaseAttention(nn.Module):
 
         if USE_SDPA_BACKEND:
             with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                print("Using Flash Attention!", flush=True)
                 attn_output = F.scaled_dot_product_attention(
                     query_states.contiguous().to(value_states.dtype),
                     key_states.contiguous().to(value_states.dtype),
