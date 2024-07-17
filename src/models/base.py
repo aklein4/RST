@@ -163,7 +163,7 @@ class BaseAttention(nn.Module):
         attn_output = F.scaled_dot_product_attention(
             query_states.contiguous(),
             key_states.contiguous(),
-            value_states.contiguous(),
+            value_states.contiguous().to(query_states.dtype),
             attn_mask=attention_mask,
             dropout_p=0.0,
             is_causal=is_causal,
