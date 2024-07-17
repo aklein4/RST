@@ -15,15 +15,15 @@ class XLALMTrainer(BaseXLATrainer):
         ignore_index = tokenizer.pad_token_id
 
         if model.ignore_segment_ids:
-            eos_index = None
+            extra_mask = None
         else:
-            eos_index = tokenizer.eos_token_id
+            extra_mask = seg_ids[:, :-1] == seg_ids[:, 1:]
 
         results = DotDict(
-            lm_loss=loss(out, x, ignore_index, eos_index),
-            lm_ppl=ppl(out, x, ignore_index, eos_index),
-            lm_acc=acc(out, x, ignore_index, eos_index),
-            lm_pcorr=pcorr(out, x, ignore_index, eos_index),
+            lm_loss=loss(out, x, ignore_index, extra_mask),
+            lm_ppl=ppl(out, x, ignore_index, extra_mask),
+            lm_acc=acc(out, x, ignore_index, extra_mask),
+            lm_pcorr=pcorr(out, x, ignore_index, extra_mask),
         )
         results.loss = results.lm_loss
 
