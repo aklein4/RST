@@ -10,10 +10,10 @@ from utils.config_utils import load_model_config
 import utils.constants as constants
 
 
-MODEL_CONFIG = 'test-rst'
+MODEL_CONFIG = 'long-rst'
 BASE_CONFIG = 'long-base'
 
-COMPARE = False
+COMPARE = True
 
 
 def main():
