@@ -72,22 +72,24 @@ class SSMConnection(nn.Module):
         self.A = nn.Parameter(torch.zeros(1, 1, self.half_size))
 
         # project y into the stream
-        self.W = nn.Linear(self.y_size, self.hidden_size, bias=False)
+        self.W = nn.Linear(self.y_size, self.hidden_size + config.delta_rank, bias=False)
         
         # calculate delta from y and hidden states
         self.delta_norm = SplitNorm(self.hidden_size, config.layer_norm_eps)
-        
         self.delta_down_h = nn.Linear(self.hidden_size, config.delta_rank, bias=False)
-        self.delta_down_y = nn.Linear(self.y_size, config.delta_rank, bias=False)
         
         self.delta_up = nn.Linear(config.delta_rank, self.hidden_size, bias=True)
 
 
     def forward(self, hidden_states, y):
 
-        # it is likely faster to add these
+        # calculate output and down_y in same operation
+        y_w = self.W(y)
+        y_out = y_w[:, :, :self.hidden_size]
+        down_y = y_w[:, :, self.hidden_size:]
+
+        # get low rank delta from hidden states
         down_h = self.delta_down_h(self.delta_norm(hidden_states))
-        down_y = self.delta_down_y(y)
 
         # get delta
         delta = self.delta_up(down_h + down_y)
@@ -101,9 +103,6 @@ class SSMConnection(nn.Module):
         # add residuals
         A_bar = torch.cat([A_bar, torch.ones_like(A_bar)], dim=-1)
         B_bar = torch.cat([B_bar, delta[:, :, self.half_size:]], dim=-1)
-
-        # calculate output
-        y_out = self.W(y)
 
         return (
             A_bar * hidden_states +
