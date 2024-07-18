@@ -100,16 +100,14 @@ class SSMConnection(nn.Module):
         A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
         B_bar = (A_bar - 1) / (A_neg - self.ssm_epsilon)
 
-        ssm_states = (
-            A_bar * hidden_states[:, :, :self.half_size] + 
-            B_bar * y_out[:, :, :self.half_size]
-        )
-        skip_states = (
-            hidden_states[:, :, self.half_size:] + 
-            delta[:, :, self.half_size:] * y_out[:, :, self.half_size:]
-        )
+        # add residuals
+        A_bar = torch.cat([A_bar, torch.ones_like(A_bar)], dim=-1)
+        B_bar = torch.cat([B_bar, delta[:, :, self.half_size:]], dim=-1)
 
-        return torch.cat([ssm_states, skip_states], dim=-1)
+        return (
+            A_bar * hidden_states +
+            B_bar * y_out
+        )
 
 
 class RSTAttention(BaseAttention):
