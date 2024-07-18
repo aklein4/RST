@@ -27,4 +27,4 @@ delta_rank: 8
 ssm_epsilon: 0.00001
 
 ignore_segment_ids: true
-gradient_checkpointing: false
+gradient_checkpointing: true
