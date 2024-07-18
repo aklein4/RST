@@ -10,8 +10,8 @@ from utils.config_utils import load_model_config
 import utils.constants as constants
 
 
-MODEL_CONFIG = 'long-rst'
-BASE_CONFIG = 'long-base'
+MODEL_CONFIG = 'med-rst'
+BASE_CONFIG = 'med-base'
 
 COMPARE = True
 
