@@ -1,7 +1,7 @@
 
-model_type: base
+model_type: rst
 architectures: [
-    BaseLmModel
+    RSTLmModel
 ]
 
 max_sequence_length: 1024
