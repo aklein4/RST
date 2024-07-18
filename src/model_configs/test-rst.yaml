@@ -1,16 +1,16 @@
 
-model_type: base
+model_type: rst
 architectures: [
-    BaseLmModel
+    RSTLmModel
 ]
 
-max_sequence_length: 1024
+max_sequence_length: 16
 
-hidden_size: 768
-mlp_size: 2048
+hidden_size: 128
+mlp_size: 256
 
-num_layers: 24
-num_attention_heads: 12
+num_layers: 4
+num_attention_heads: 2
 
 use_qkv_bias: true
 hidden_act: silu
@@ -21,6 +21,9 @@ rope_base: 10000
 
 initializer_range: 0.02
 identity_init: false
+
+selection_size: 37
+delta_rank: 8
 
 ignore_segment_ids: false
 gradient_checkpointing: false

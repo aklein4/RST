@@ -34,7 +34,7 @@ class RatInput(nn.Module):
 
 
     # @ torch.no_grad()()
-    def _special_init_weights(self, config):
+    def special_init_weights(self, config):
         self.conv.weight.data.normal_()
         self.post_step()
 
@@ -101,7 +101,7 @@ class RatInput(nn.Module):
 class RatOutput(nn.Module):
 
     # @ torch.no_grad()()
-    def _special_init_weights(self, config):
+    def special_init_weights(self, config):
         self.conv.weight.data.normal_()
         self.post_step()
 
@@ -193,16 +193,16 @@ class RatMLP(BaseMLP):
 class RatLayer(nn.Module):
 
     # @ torch.no_grad()()
-    def _special_init_weights(self, config: BaseConfig):
+    def special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             self.attn.o_proj.weight.data.zero_()
             self.mlp.down_proj.weight.data.zero_()
 
-        self.attn_input._special_init_weights(config)
-        self.mlp_input._special_init_weights(config)
+        self.attn_input.special_init_weights(config)
+        self.mlp_input.special_init_weights(config)
 
-        self.attn_output._special_init_weights(config)
-        self.mlp_output._special_init_weights(config)
+        self.attn_output.special_init_weights(config)
+        self.mlp_output.special_init_weights(config)
 
 
     # @ torch.no_grad()()
@@ -266,12 +266,12 @@ class RatTransformer(BaseTransformer):
 
 
     # @ torch.no_grad()()
-    def _special_init_weights(self, config):
-        super()._special_init_weights(config)
+    def special_init_weights(self, config):
+        super().special_init_weights(config)
 
-        self.proj_in._special_init_weights(config)
-        self.pos_in._special_init_weights(config)
-        self.norm._special_init_weights(config)
+        self.proj_in.special_init_weights(config)
+        self.pos_in.special_init_weights(config)
+        self.norm.special_init_weights(config)
     
 
     # @ torch.no_grad()()

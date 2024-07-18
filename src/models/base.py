@@ -124,8 +124,9 @@ class BaseAttention(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self._init_qkv_proj(config)
-        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        
+        self.init_qkv_proj(config)
+        self.init_o_proj(config)
 
         self.rope = RotaryEmbedding(
             self.head_dim, config.rope_fraction,
@@ -134,11 +135,18 @@ class BaseAttention(nn.Module):
         )
 
 
-    def _init_qkv_proj(self, config):
+    def init_qkv_proj(self, config):
         self.qkv_proj = nn.Linear(self.hidden_size, 3 * self.num_heads * self.head_dim, bias=config.use_qkv_bias)
 
-    def _get_qkv(self, hidden_states):
+    def init_o_proj(self, config):
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+
+
+    def get_qkv(self, hidden_states):
         return self.qkv_proj(hidden_states).chunk(3, dim=-1)
+
+    def get_o(self, attention_output):
+        return self.o_proj(attention_output)
 
 
     def forward(
@@ -148,17 +156,19 @@ class BaseAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
     ):
-        bsz, q_len, _ = hidden_states.shape
 
         # get tensors for attention
-        query_states, key_states, value_states = self._get_qkv(hidden_states)
+        query_states, key_states, value_states = self.get_qkv(hidden_states)
+
+        # get shapes
+        bsz, q_len, _ = query_states.shape
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # apply rope
-        # query_states, key_states = self.rope(query_states, key_states, position_ids)
+        query_states, key_states = self.rope(query_states, key_states, position_ids)
 
         # update/apply cache
         if past_key_value is not None:
@@ -176,7 +186,7 @@ class BaseAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        return self.o_proj(attn_output)
+        return self.get_o(attn_output)
 
 
 class BaseMLP(nn.Module):
@@ -187,34 +197,39 @@ class BaseMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.mlp_size = config.mlp_size
 
-        self._init_mlp_input(config)
-        self.down_proj = nn.Linear(self.mlp_size, self.hidden_size, bias=False)
+        self.init_mlp_input(config)
+        self.init_mlp_output(config)
+        
         self.act_fn = ACT2FN[config.hidden_act]
 
 
-    def _init_mlp_input(self, config):
+    def init_mlp_input(self, config):
         self.in_proj = nn.Linear(self.hidden_size, 2 * self.mlp_size, bias=False)
 
-    def _get_mlp_input(self, hidden_state):
+    def init_mlp_output(self, config):
+        self.out_proj = nn.Linear(self.mlp_size, self.hidden_size, bias=False)
+
+
+    def get_mlp_input(self, hidden_state):
         return self.in_proj(hidden_state).chunk(2, dim=-1)
+
+    def get_mlp_output(self, hidden_state):
+        return self.out_proj(hidden_state)
 
 
     def forward(self, hidden_state):
-        gate, h = self._get_mlp_input(hidden_state)
+        gate, h = self.get_mlp_input(hidden_state)
 
-        return self.down_proj(self.act_fn(gate) * h)
+        return self.get_mlp_output(self.act_fn(gate) * h)
 
 
 class BaseLayer(nn.Module):
     
-    
-    # @ torch.no_grad()()
-    def _special_init_weights(self, config: BaseConfig):
+    def special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             self.attn.o_proj.weight.data.zero_()
-            self.mlp.down_proj.weight.data.zero_()
+            self.mlp.out_proj.weight.data.zero_()
 
-    # @ torch.no_grad()()
     def post_step(self):
         pass
 
@@ -260,16 +275,12 @@ class BaseLayer(nn.Module):
 class BaseTransformer(nn.Module):
 
     layer_type = BaseLayer
-    def get_norm(self, config):
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
 
-    # @ torch.no_grad()()
-    def _special_init_weights(self, config: BaseConfig):
+    def special_init_weights(self, config: BaseConfig):
         for layer in self.layers:
-            layer._special_init_weights(config)
+            layer.special_init_weights(config)
 
-    # @ torch.no_grad()()
     def post_step(self):
         for layer in self.layers:
             layer.post_step()
@@ -284,17 +295,22 @@ class BaseTransformer(nn.Module):
 
         # weights
         self.vocab_embs = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
+        # self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
+        
         self.layers = nn.ModuleList(
             [self.layer_type(config, layer_idx) for layer_idx in range(config.num_layers)]
         )
-        self.get_norm(config)
+        
+        self.get_extras(config)
 
         # Compute configuration
         self.gradient_checkpointing = False
 
-    
-    @torch.no_grad()
+
+    def get_extras(self, config):
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+
     def _get_mask(
         self,
         input_ids: torch.LongTensor,
@@ -327,7 +343,6 @@ class BaseTransformer(nn.Module):
         return mask.detach()
 
 
-    @torch.no_grad()
     def _get_position_ids(
         self,
         input_ids: torch.LongTensor,
@@ -351,8 +366,18 @@ class BaseTransformer(nn.Module):
         input_ids: torch.LongTensor,
         position_ids: torch.LongTensor
     ) -> torch.Tensor:
+        
         hidden_states = self.vocab_embs(input_ids)
-        return hidden_states + self.pos_embs(position_ids)
+        # pos_states = self.pos_embs(position_ids)
+
+        return hidden_states # + pos_states
+
+
+    def get_output(
+        self,
+        hidden_states
+    ): 
+        return self.norm(hidden_states)
 
 
     def forward(
@@ -362,12 +387,10 @@ class BaseTransformer(nn.Module):
         position_ids: Optional[torch.LongTensor]=None,
         kv: Optional[Cache]=None,
     ):
-        batch_size, seq_length = input_ids.shape
 
         # get inputs
         position_ids = self._get_position_ids(input_ids, position_ids)
         attention_mask = self._get_mask(input_ids, segment_ids)
-
         hidden_states = self.get_hidden_states(input_ids, position_ids)
 
         # run transformer
@@ -393,12 +416,13 @@ class BaseTransformer(nn.Module):
                     past_key_value=kv,
                 )
 
-        return self.norm(hidden_states)
+        return self.get_output(hidden_states)
 
 
 class BaseLmModel(XLAModel):
 
     transformer_type = BaseTransformer
+
 
     # from StableLM
     def _init_weights(self, module):
@@ -418,11 +442,9 @@ class BaseLmModel(XLAModel):
             module.weight.data.normal_(mean=0.0, std=std)
 
 
-    @torch.no_grad()
-    def _special_init_weights(self):
-        self.model._special_init_weights(self.config)
+    def special_init_weights(self):
+        self.model.special_init_weights(self.config)
 
-    @torch.no_grad()
     def post_step(self):
         self.model.post_step()
 
