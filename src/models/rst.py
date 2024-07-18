@@ -195,6 +195,9 @@ class RSTTransformer(BaseTransformer):
 
         self.vocab_embs.weight.data[:, :config.hidden_size//2].zero_()
 
+        if self.pos_embs is not None:
+            self.pos_embs.weight.data[:, :config.hidden_size//2].zero_()
+
 
     def get_extras(self, config):
         self.norm = SplitNorm(config.hidden_size, config.layer_norm_eps)

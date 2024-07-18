@@ -37,6 +37,8 @@ class BaseConfig(XLAConfig):
             The non-linear activation function (function or string).
         layer_norm_eps (`float`, *optional*, defaults to 1e-05):
             The epsilon used by the normalization layers.
+        use_rope (`bool`, *optional*, defaults to `False`):
+            Whether or not to use the RoPE embeddings.
         rope_fraction (`int`, *optional*, defaults to 1):
             The fraction of the hidden size to use for the RoPE embeddings.
         rope_base (`float`, *optional*, defaults to `10000.0`):
@@ -69,6 +71,7 @@ class BaseConfig(XLAConfig):
         use_qkv_bias=True,
         hidden_act="silu",
         layer_norm_eps=1e-5,
+        use_rope=False,
         rope_fraction=1,
         rope_base=10000.0,
         initializer_range=0.02,
@@ -93,6 +96,7 @@ class BaseConfig(XLAConfig):
         self.hidden_act = hidden_act
         self.layer_norm_eps = layer_norm_eps
         
+        self.use_rope = use_rope
         self.rope_fraction = rope_fraction
         self.rope_base = rope_base
 
@@ -128,11 +132,15 @@ class BaseAttention(nn.Module):
         self.init_qkv_proj(config)
         self.init_o_proj(config)
 
-        self.rope = RotaryEmbedding(
-            self.head_dim, config.rope_fraction,
-            config.max_sequence_length,
-            config.rope_base
-        )
+        self.use_rope = config.use_rope
+        if self.use_rope:
+            self.rope = RotaryEmbedding(
+                self.head_dim, config.rope_fraction,
+                config.max_sequence_length,
+                config.rope_base
+            )
+        else:
+            self.rope = None
 
 
     def init_qkv_proj(self, config):
@@ -168,7 +176,8 @@ class BaseAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # apply rope
-        query_states, key_states = self.rope(query_states, key_states, position_ids)
+        if self.use_rope:
+            query_states, key_states = self.rope(query_states, key_states, position_ids)
 
         # update/apply cache
         if past_key_value is not None:
@@ -295,7 +304,12 @@ class BaseTransformer(nn.Module):
 
         # weights
         self.vocab_embs = nn.Embedding(config.vocab_size, config.hidden_size)
-        # self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
+        
+        self.use_rope = config.use_rope
+        if self.use_rope:
+            self.pos_embs = None
+        else:
+            self.pos_embs = nn.Embedding(config.max_sequence_length, config.hidden_size)
         
         self.layers = nn.ModuleList(
             [self.layer_type(config, layer_idx) for layer_idx in range(config.num_layers)]
@@ -368,9 +382,11 @@ class BaseTransformer(nn.Module):
     ) -> torch.Tensor:
         
         hidden_states = self.vocab_embs(input_ids)
-        # pos_states = self.pos_embs(position_ids)
+        
+        if not self.use_rope:
+            hidden_states = hidden_states + self.pos_embs(position_ids)
 
-        return hidden_states # + pos_states
+        return hidden_states
 
 
     def get_output(
