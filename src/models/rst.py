@@ -16,41 +16,26 @@ class RSTConfig(BaseConfig):
 
     def __init__(
         self,
-        selection_size: int = 4,
         delta_rank: int = 1,
+        ssm_epsilon: float = 1e-5,
         *args,
         **kwargs,
     ):
         
-        self.selection_size = selection_size
         self.delta_rank = delta_rank
+        self.ssm_epsilon = ssm_epsilon
 
         super().__init__(*args, **kwargs)
 
 
-class SplitNorm(nn.Module):
+class SplitNorm(nn.GroupNorm):
+    def __init__(self, c, eps=1e-5, affine=True):
+        super().__init__(2, c, eps, affine)
 
-    def __init__(self, hidden_size, selection_size, eps):
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.selection_size = selection_size
-        self.residual_size = hidden_size - selection_size
-
-        self.selection_norm = nn.LayerNorm(selection_size, eps=eps)
-        self.residual_norm = nn.LayerNorm(self.residual_size, eps=eps)
-
-
-    def forward(self, hidden_states):
-        selection_states, residual_states = hidden_states.split(
-            [self.selection_size, self.residual_size],
-            dim=-1
-        )
-
-        selection_states = self.selection_norm(selection_states)
-        residual_states = self.residual_norm(residual_states)
-
-        return torch.cat([selection_states, residual_states], dim=-1)
+    def forward(self, x):
+        bs, l, d = x.shape
+        out = super().forward(x.view(bs*l, d))
+        return out.view(bs, l, d)
 
 
 class SSMConnection(nn.Module):
@@ -66,6 +51,10 @@ class SSMConnection(nn.Module):
         t = 0.001 + (
             torch.rand_like(self.delta_up.bias.data) * (0.1 - 0.001)
         )
+
+        # residual gets t=1
+        t[..., self.half_size:].fill_(1.0)
+
         self.delta_up.bias.data = torch.log(t.exp() - 1)
 
 
@@ -73,57 +62,53 @@ class SSMConnection(nn.Module):
         super().__init__()
 
         self.hidden_size = config.hidden_size
-        self.selection_size = config.selection_size
-        self.residual_size = self.hidden_size - self.selection_size
+        self.half_size = self.hidden_size // 2
+        assert self.half_size * 2 == self.hidden_size, f"hidden_size {self.hidden_size} must be even!"
+
         self.y_size = y_size
+        self.ssm_epsilon = config.ssm_epsilon
 
         # decay factor
-        self.A = nn.Parameter(-torch.ones(1, 1, self.selection_size))
+        self.A = nn.Parameter(torch.zeros(1, 1, self.half_size))
 
         # project y into the stream
         self.W = nn.Linear(self.y_size, self.hidden_size, bias=False)
         
         # calculate delta from y and hidden states
-        self.delta_norm = SplitNorm(self.hidden_size, self.selection_size, config.layer_norm_eps)
-        self.delta_down = nn.Linear(self.hidden_size + self.y_size, config.delta_rank, bias=False)
-        self.delta_up = nn.Linear(config.delta_rank, self.selection_size, bias=True)
+        self.delta_norm = SplitNorm(self.hidden_size, config.layer_norm_eps)
+        
+        self.delta_down_h = nn.Linear(self.hidden_size, config.delta_rank, bias=False)
+        self.delta_down_y = nn.Linear(self.y_size, config.delta_rank, bias=False)
+        
+        self.delta_up = nn.Linear(config.delta_rank, self.hidden_size, bias=True)
 
 
     def forward(self, hidden_states, y):
 
-        # split components
-        selection_states, residual_states = hidden_states.split(
-            [self.selection_size, self.residual_size],
-            dim=-1
-        )
-        selection_y, residual_y = self.W(y).split(
-            [self.selection_size, self.residual_size],
-            dim=-1
-        )
+        # it is likely faster to add these
+        down_h = self.delta_down_h(self.delta_norm(hidden_states))
+        down_y = self.delta_down_y(y)
 
         # get delta
-        delta = self.delta_up(
-            self.delta_down(
-                torch.cat(
-                    [
-                        self.delta_norm(hidden_states),
-                        y
-                    ],
-                    dim=-1
-                )
-            )
-        )
+        delta = self.delta_up(down_h + down_y)
         delta = F.softplus(delta)
 
         # calculate SSM matrices
         A_neg = -F.softplus(self.A)
-        A_bar = torch.exp(delta * A_neg)
-        B_bar = (A_bar - 1) / A_neg
+        A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
+        B_bar = (A_bar - 1) / (A_neg + self.ssm_epsilon)
 
-        selection_states = A_bar * selection_states + B_bar * selection_y
-        residual_states = residual_states + residual_y
+        # add residuals
+        A_bar = torch.cat([A_bar, torch.ones_like(A_bar)], dim=-1)
+        B_bar = torch.cat([B_bar, delta[:, :, self.half_size:]], dim=-1)
 
-        return torch.cat([selection_states, residual_states], dim=-1)
+        # calculate output
+        y_out = self.W(y)
+
+        return (
+            A_bar * hidden_states +
+            B_bar * y_out
+        )
 
 
 class RSTAttention(BaseAttention):
@@ -167,9 +152,8 @@ class RSTLayer(nn.Module):
 
         h = config.hidden_size
         eps = config.layer_norm_eps
-
-        self.attn_norm = SplitNorm(h, config.selection_size, eps)
-        self.mlp_norm = SplitNorm(h, config.selection_size, eps)
+        self.attn_norm = SplitNorm(h, eps)
+        self.mlp_norm = SplitNorm(h, eps)
 
         self.attn_connection = SSMConnection(config, self.hidden_size)
         self.mlp_connection = SSMConnection(config, config.mlp_size)
@@ -209,11 +193,11 @@ class RSTTransformer(BaseTransformer):
     def special_init_weights(self, config: BaseConfig):
         super().special_init_weights(config)
 
-        self.vocab_embs.weight.data[:, :config.selection_size].zero_()
+        self.vocab_embs.weight.data[:, :config.hidden_size//2].zero_()
 
 
     def get_extras(self, config):
-        self.norm = SplitNorm(config.hidden_size, config.selection_size, config.layer_norm_eps)
+        self.norm = SplitNorm(config.hidden_size, config.layer_norm_eps)
 
 
 class RSTLmModel(BaseLmModel):

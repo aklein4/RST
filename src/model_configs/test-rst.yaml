@@ -22,8 +22,8 @@ rope_base: 10000
 initializer_range: 0.02
 identity_init: false
 
-selection_size: 37
 delta_rank: 8
+ssm_epsilon: 0.00001
 
 ignore_segment_ids: false
 gradient_checkpointing: false
