@@ -1,15 +1,10 @@
 import torch
 
-try:
-    from torch_xla.utils.checkpoint import checkpoint as xla_checkpoint_fn
-except ImportError:
-    pass
-
-import functools
-
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
 from utils.logging_utils import log_print
+from utils.model_utils import checkpoint_barrier
+import utils.constants as constants
 
 
 class XLAConfig(PretrainedConfig):
@@ -36,26 +31,13 @@ class XLAModel(PreTrainedModel):
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
 
-
-    # converted from torch to torch xla
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={}):
-        if not self.supports_gradient_checkpointing:
-            raise ValueError(f"{self.__class__.__name__} does not support gradient checkpointing.")
-        
-        gradient_checkpointing_func = functools.partial(xla_checkpoint_fn, **gradient_checkpointing_kwargs)
-        self._set_gradient_checkpointing(enable=True, gradient_checkpointing_func=gradient_checkpointing_func)
-        
-        if hasattr(self, "gradient_checkpointing"):
-            log_print(f"Gradient checkpointing enabled for {self.__class__.__name__}: {self.gradient_checkpointing}")
-        for module in self.modules():
-            if hasattr(module, "gradient_checkpointing"):
-                log_print(f"Gradient checkpointing enabled for {module.__class__.__name__}: {module.gradient_checkpointing}")
-
+    requires_barrier = False
 
     def __init__(self, *args, fast_start=False, **kwargs):
         super().__init__(*args, **kwargs)
 
         self._fast_start = fast_start
+        self.requires_barrier = self.requires_barrier or self.config.gradient_checkpointing
 
 
     def init_weights(self):
@@ -71,3 +53,10 @@ class XLAModel(PreTrainedModel):
 
     def post_step(self):
         pass
+
+
+    def post_forward(self, outputs):
+        if self.requires_barrier and self.training:
+            checkpoint_barrier(outputs)
+
+        return outputs

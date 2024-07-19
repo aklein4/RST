@@ -298,4 +298,7 @@ class RatTransformer(BaseTransformer):
 
 
 class RatLmModel(BaseLmModel):
+    
     transformer_type = RatTransformer
+
+    requires_barrier = True

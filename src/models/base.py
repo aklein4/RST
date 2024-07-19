@@ -10,7 +10,10 @@ from transformers.cache_utils import Cache
 from transformers.activations import ACT2FN
 
 from models.xla import XLAConfig, XLAModel
-from utils.model_utils import RotaryEmbedding
+from utils.model_utils import (
+    RotaryEmbedding,
+    fast_checkpoint
+)
 
 
 class BaseConfig(XLAConfig):
@@ -318,7 +321,7 @@ class BaseTransformer(nn.Module):
         self.get_extras(config)
 
         # Compute configuration
-        self.gradient_checkpointing = False
+        self.gradient_checkpointing = config.gradient_checkpointing
 
 
     def get_extras(self, config):
@@ -416,7 +419,7 @@ class BaseTransformer(nn.Module):
                 if kv is not None:
                     raise ValueError("Gradient checkpointing is not compatible with cache!")
 
-                hidden_states = self._gradient_checkpointing_func(
+                hidden_states = fast_checkpoint(
                     layer.__call__,
                     hidden_states,
                     position_ids,
@@ -503,4 +506,4 @@ class BaseLmModel(XLAModel):
         lm_logits = self.lm_head(out)
         lm_logits = F.log_softmax(lm_logits, dim=-1)
 
-        return lm_logits
+        return self.post_forward(lm_logits)
