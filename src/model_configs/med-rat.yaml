@@ -29,4 +29,6 @@ delta_rank: 32
 ssm_eps: 0.00001
 
 ignore_segment_ids: false
-gradient_checkpointing: false
+
+gradient_checkpointing: true
+gradient_checkpointing_layers: 4

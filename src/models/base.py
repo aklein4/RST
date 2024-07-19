@@ -59,6 +59,8 @@ class BaseConfig(XLAConfig):
             The id of the `PAD` token in the vocabulary.
         ignore_segment_ids (`bool`, *optional*, defaults to `False`):
             Whether or not to ignore the segment ids in transformer.
+        gradient_checkpointing_layers (`int`, *optional*, defaults to 1000000):
+            The number of layers to checkpoint in the model.
     """
 
     model_type = 'base'
@@ -83,6 +85,7 @@ class BaseConfig(XLAConfig):
         eos_token_id=0,
         pad_token_id=0,
         ignore_segment_ids=False,
+        gradient_checkpointing_layers=1000000,
         *args,
         **kwargs,
     ):
@@ -111,6 +114,8 @@ class BaseConfig(XLAConfig):
         self.pad_token_id = pad_token_id
 
         self.ignore_segment_ids = ignore_segment_ids
+
+        self.gradient_checkpointing_layers = gradient_checkpointing_layers
 
         super().__init__(*args, **kwargs)
 
@@ -322,6 +327,7 @@ class BaseTransformer(nn.Module):
 
         # Compute configuration
         self.gradient_checkpointing = config.gradient_checkpointing
+        self.gradient_checkpointing_layers = config.gradient_checkpointing_layers
 
 
     def get_extras(self, config):
@@ -413,9 +419,9 @@ class BaseTransformer(nn.Module):
         hidden_states = self.get_hidden_states(input_ids, position_ids)
 
         # run transformer
-        for layer in self.layers:
+        for idx, layer in enumerate(self.layers):
 
-            if self.gradient_checkpointing and self.training:
+            if self.gradient_checkpointing and self.training and idx < self.gradient_checkpointing_layers:
                 if kv is not None:
                     raise ValueError("Gradient checkpointing is not compatible with cache!")
 
