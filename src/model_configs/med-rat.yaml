@@ -31,4 +31,4 @@ ssm_eps: 0.00001
 ignore_segment_ids: false
 
 gradient_checkpointing: true
-gradient_checkpointing_layers: 4
+gradient_checkpointing_layers: 6
