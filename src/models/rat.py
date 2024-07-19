@@ -26,6 +26,7 @@ class RatConfig(BaseConfig):
         
         self.residual_channels = residual_channels
         self.residual_heads = residual_heads
+        self.dot_norm_eps = dot_norm_eps
 
         super().__init__(*args, **kwargs)
 
@@ -64,7 +65,7 @@ class RatRead(nn.Module):
         self.conv = nn.Conv1d(
             self.residual_size, self.output_size,
             kernel_size=1, bias=False,
-            groups=self.residual_groups
+            groups=self.hidden_size
         )
 
         self.norm = nn.GroupNorm(
@@ -77,9 +78,18 @@ class RatRead(nn.Module):
     def compute(self, hidden_states):
         bs, l, _ = hidden_states.shape
 
+        # [B, L, HN]
         hidden_states = hidden_states.view(bs*l, self.residual_size, 1)
         hidden_states = self.conv(hidden_states)
         hidden_states = hidden_states.view(bs, l, self.output_size)
+
+        # [B, L, N, H]
+        hidden_states = (
+            hidden_states
+            .view(bs, l, self.hidden_size, self.num_outputs)
+            .permute(0, 1, 3, 2)
+            .reshape(bs, l, self.output_size)
+        )
 
         return self.norm(hidden_states)
     
@@ -90,54 +100,87 @@ class RatRead(nn.Module):
 
 class RatWrite(nn.Module):
 
-    # @ torch.no_grad()()
     def special_init_weights(self, config):
-        self.conv.weight.data.normal_()
-        self.post_step()
 
+        # TODO: is this is best way?
+        self.A.data.normal_(0.0, config.initializer_range)
 
-    # @ torch.no_grad()()
-    def post_step(self):
+        self.delta_up.weight.data.zero_()
 
-        pieces = self.conv.weight.data.chunk(self.residual_groups, dim=0)
-        pieces = torch.stack(pieces, dim=-1)
-        pieces = pieces / (
-            pieces.norm(p=2, dim=0, keepdim=True) +
-            self.rat_norm_eps
+        # TODO: this is hardcoded from MAMBA
+        t = 0.001 + (
+            torch.rand_like(self.delta_up.bias.data) * (0.1 - 0.001)
         )
 
-        pieces = pieces.chunk(self.residual_groups, dim=-1)
-        pieces = torch.cat(pieces, dim=0).squeeze(-1)
+        # residual gets t=1
+        t[..., self.half_size:].fill_(1.0)
 
-        self.conv.weight.data[:] = pieces.detach()
+        self.delta_up.bias.data = torch.log(t.exp() - 1)
 
 
-    def __init__(self, config):
+    def __init__(self, config, y_size):
         super().__init__()
-        self.rat_norm_eps = config.rat_norm_eps
 
         self.hidden_size = config.hidden_size
-        self.residual_multiplier = config.residual_multiplier
-        self.residual_size = self.hidden_size * self.residual_multiplier
+        self.residual_channels = config.residual_channels
+        self.residual_heads = config.residual_heads
         
-        self.residual_groups = config.residual_groups
-        assert self.hidden_size % self.residual_groups == 0
+        self.head_size = self.hidden_size // self.residual_heads
+        assert self.hidden_size % self.residual_heads == 0
+        self.control_size = self.residual_channels * self.residual_heads
 
-        self.conv = nn.Conv1d(
-            self.hidden_size, self.residual_size,
-            kernel_size=1, bias=False,
-            groups=self.residual_groups
+        self.y_size = y_size
+        self.ssm_epsilon = config.ssm_epsilon
+
+        # projections for y
+        self.Wo_Wd = nn.Linear(self.y_size, self.hidden_size + config.delta_rank, bias=False)
+        self.WA_WB = nn.Linear(self.y_size, 2 * self.control_size, bias=True)
+        
+        # up projection for delta
+        self.delta_up = nn.Linear(config.delta_rank, self.hidden_size, bias=True)
+
+
+    def compute(self, hidden_states, o_d, A_B):
+        bs, l, _ = hidden_states.shape
+
+        # split o_d
+        out = o_d[:, :, :self.hidden_size]
+        delta_low = o_d[:, :, self.hidden_size:]
+
+        # split A_B
+        A = A_B[:, :, :self.control_size]
+        B = A_B[:, :, self.control_size:]
+
+        # get delta
+        delta = self.delta_up(delta_low)
+        delta = F.softplus(delta)
+
+        # reshape for SSM
+        out = out.view(bs, l, self.head_size, self.residual_channels)
+
+
+        # calculate SSM matrices
+        A_neg = -F.softplus(self.A)
+        A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
+        B_bar = (A_bar - 1) / (A_neg - self.ssm_epsilon)
+
+        # add residuals
+        A_bar = torch.cat([A_bar, torch.ones_like(A_bar)], dim=-1)
+        B_bar = torch.cat([B_bar, delta[:, :, self.half_size:]], dim=-1)
+
+        return (
+            A_bar * hidden_states +
+            B_bar * y_out
         )
 
 
-    def forward(self, hidden_states):
-        bs, l, _ = hidden_states.shape
+    def forward(self, hidden_states, y):
 
-        hidden_states = hidden_states.view(bs*l, self.hidden_size, 1)
-        hidden_states = self.conv(hidden_states)
-        hidden_states = hidden_states.view(bs, l, self.residual_size)
+        # do major projections
+        o_d = self.W(y)
+        A_B = self.WA_WB(y)
 
-        return hidden_states
+        return fast_checkpoint(self.compute, hidden_states, o_d, A_B)
 
 
 class RatAttention(BaseAttention):
