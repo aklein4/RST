@@ -14,6 +14,8 @@ try:
 except:
     pass
 
+import inspect
+
 from utils.logging_utils import log_master_print
 
 
@@ -32,7 +34,7 @@ def _extract_tensors_from_list(inputs):
 
 
 def checkpoint_barrier(inputs):
-    print("here!")
+    return
     xm.optimization_barrier_(
         _extract_tensors_from_list(inputs)
     )
@@ -99,22 +101,25 @@ class _FastCheckpointFunction(torch.autograd.Function):
     for i, idx in enumerate(tensor_indices):
       inputs[idx] = tensors[i]
 
-    """
-    It may be more efficient to call a single optimization barrier after
-    the model forward pass, rather than after the original layers.
 
+    # It may be more efficient to call a single optimization barrier after
+    # the model forward pass, rather than after the original layers.
     # optimization_barrier_ is needed to separate the original forward pass with
     # the next forward + backward pass.
     weights = []
     buffers = []
-    if inspect.ismethod(ctx.run_function) and isinstance(
-        ctx.run_function.__self__, torch.nn.Module):
-      weights = list(ctx.run_function.__self__.parameters())
-      buffers = list(ctx.run_function.__self__.buffers())
+    if (
+       inspect.ismethod(ctx.run_function) and
+       isinstance(ctx.run_function.__self__, torch.nn.Module)
+    ):
+        weights = list(ctx.run_function.__self__.parameters())
+        buffers = list(ctx.run_function.__self__.buffers())
     xm.optimization_barrier_(
-        CheckpointFunction._extract_tensors_from_list(inputs + list(args) +
-                                                      weights + buffers))
-    """
+        _extract_tensors_from_list(
+            inputs + list(args) +
+            weights + buffers
+        )
+    )
 
     detached_inputs = detach_variable(tuple(inputs))
     with torch.enable_grad(), \

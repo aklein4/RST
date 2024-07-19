@@ -127,14 +127,16 @@ class RatWrite(nn.Module):
         
         self.head_size = self.hidden_size // self.residual_heads
         assert self.hidden_size % self.residual_heads == 0
-        self.control_size = self.residual_channels * self.residual_heads
+        
+        self.A_size = (1 - self.residual_channels) * self.residual_heads
+        self.B_size = self.residual_channels * self.residual_heads
 
         self.y_size = y_size
         self.ssm_epsilon = config.ssm_epsilon
 
         # projections for y
         self.Wo_Wd = nn.Linear(self.y_size, self.hidden_size + config.delta_rank, bias=False)
-        self.WA_WB = nn.Linear(self.y_size, 2 * self.control_size, bias=True)
+        self.WA_WB = nn.Linear(self.y_size, self.A_size + self.B_size, bias=True)
         
         # up projection for delta
         self.delta_up = nn.Linear(config.delta_rank, self.hidden_size, bias=True)
@@ -148,19 +150,24 @@ class RatWrite(nn.Module):
         delta_low = o_d[:, :, self.hidden_size:]
 
         # split A_B
-        A = A_B[:, :, :self.control_size]
-        B = A_B[:, :, self.control_size:]
+        A_logit = A_B[:, :, :self.A_size] # A_size
+        B_raw = A_B[:, :, self.A_size:] # B_size
+        B_proj = B_raw[:, :, :self.A_size] # A_size
+        B_skip = B_raw[:, :, self.A_size:] # heads
 
         # get delta
         delta = self.delta_up(delta_low)
         delta = F.softplus(delta)
 
         # reshape for SSM
-        out = out.view(bs, l, self.head_size, self.residual_channels)
+        out = out.view(bs, l, self.head_size, self.residual_heads, 1)
+        delta = delta.
+        A_raw = A_raw.view(bs, l, self.head_size, 1, self.residual_channels)
+        B_raw = B_raw.view(bs, l, self.head_size, 1, self.residual_channels)
 
 
         # calculate SSM matrices
-        A_neg = -F.softplus(self.A)
+        A_neg = -F.softplus(A_raw)
         A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
         B_bar = (A_bar - 1) / (A_neg - self.ssm_epsilon)
 
