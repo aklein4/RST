@@ -8,6 +8,7 @@ from models.base import (
     BaseConfig, BaseTransformer, BaseLmModel,
     BaseAttention, BaseMLP
 )
+from utils.model_utils import fast_checkpoint
 
 
 class RatConfig(BaseConfig):
@@ -29,7 +30,7 @@ class RatConfig(BaseConfig):
         super().__init__(*args, **kwargs)
 
 
-class RatInput(nn.Module):
+class RatRead(nn.Module):
 
 
     def special_init_weights(self, config):
@@ -76,28 +77,18 @@ class RatInput(nn.Module):
     def compute(self, hidden_states):
         bs, l, _ = hidden_states.shape
 
-        # [B, L, HN]
         hidden_states = hidden_states.view(bs*l, self.residual_size, 1)
         hidden_states = self.conv(hidden_states)
         hidden_states = hidden_states.view(bs, l, self.output_size)
 
-        # [B, L, N, H]
-        hidden_states = (
-            hidden_states
-            .view(bs, l, self.hidden_size, self.num_outputs)
-            .permute(0, 1, 3, 2)
-        )
+        return self.norm(hidden_states)
+    
 
-        # apply norm
-        hidden_states = self.norm(hidden_states) * self.scales + self.bias
-
-        # [B, L, NH]
-        hidden_states = hidden_states.view(bs, l, self.output_size)
-
-        return hidden_states
+    def forward(self, hidden_states):
+        return fast_checkpoint(self.compute, hidden_states)
 
 
-class RatOutput(nn.Module):
+class RatWrite(nn.Module):
 
     # @ torch.no_grad()()
     def special_init_weights(self, config):

@@ -62,6 +62,6 @@ class XLAModel(PreTrainedModel):
 
     def post_forward(self, outputs):
         if self.requires_barrier and self.training:
-            return checkpoint_barrier(outputs)
+            checkpoint_barrier(outputs)
 
         return outputs

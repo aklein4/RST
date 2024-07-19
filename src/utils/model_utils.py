@@ -32,8 +32,7 @@ def _extract_tensors_from_list(inputs):
 
 
 def checkpoint_barrier(inputs):
-    log_master_print("checkpoint_barrier")
-    return xm.optimization_barrier(
+    xm.optimization_barrier_(
         _extract_tensors_from_list(inputs)
     )
 
