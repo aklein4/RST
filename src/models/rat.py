@@ -160,25 +160,27 @@ class RatWrite(nn.Module):
         delta = F.softplus(delta)
 
         # reshape for SSM
+        hidden_states = hidden_states.view(bs, l, self.head_size, self.residual_heads, self.residual_channels)
         out = out.view(bs, l, self.head_size, self.residual_heads, 1)
-        delta = delta.
-        A_raw = A_raw.view(bs, l, self.head_size, 1, self.residual_channels)
-        B_raw = B_raw.view(bs, l, self.head_size, 1, self.residual_channels)
-
+        delta = delta.view(bs, l, self.head_size, self.residual_heads, 1)
+        A_logit = A_logit.view(bs, l, self.head_size, 1, self.residual_channels-1)
+        B_proj = B_proj.view(bs, l, self.head_size, 1, self.residual_channels-1)
+        B_skip = B_skip.view(bs, l, self.head_size, 1, 1)
 
         # calculate SSM matrices
-        A_neg = -F.softplus(A_raw)
+        A_neg = -F.softplus(A_logit)
         A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
+        
         B_bar = (A_bar - 1) / (A_neg - self.ssm_epsilon)
+        B_bar_skip = delta * B_skip
 
         # add residuals
-        A_bar = torch.cat([A_bar, torch.ones_like(A_bar)], dim=-1)
-        B_bar = torch.cat([B_bar, delta[:, :, self.half_size:]], dim=-1)
+        A_bar = torch.cat([A_bar, torch.ones_like(A_bar[:, :, :, :1])], dim=-1)
+        B_bar = torch.cat([B_bar, B_bar_skip], dim=-1)
 
-        return (
-            A_bar * hidden_states +
-            B_bar * y_out
-        )
+        out = hidden_states * A_bar + out * B_bar
+
+        return out.view(bs, l, self.hidden_size)
 
 
     def forward(self, hidden_states, y):
