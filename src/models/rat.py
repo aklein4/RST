@@ -16,16 +16,15 @@ class RatConfig(BaseConfig):
 
     def __init__(
         self,
-        residual_multiplier: int = 4,
-        residual_groups: int = 16,
-        rat_norm_eps: float = 1e-5,
+        residual_channels: int = 4,
+        residual_heads: int = 16,
+        dot_norm_eps: float = 1e-5,
         *args,
         **kwargs,
     ):
         
-        self.residual_multiplier = residual_multiplier
-        self.residual_groups = residual_groups
-        self.rat_norm_eps = rat_norm_eps
+        self.residual_channels = residual_channels
+        self.residual_heads = residual_heads
 
         super().__init__(*args, **kwargs)
 
@@ -33,12 +32,11 @@ class RatConfig(BaseConfig):
 class RatInput(nn.Module):
 
 
-    # @ torch.no_grad()()
     def special_init_weights(self, config):
         self.conv.weight.data.normal_()
         self.post_step()
 
-    # @ torch.no_grad()()
+
     def post_step(self):
         self.conv.weight.data[:] = (
             self.conv.weight.data / 
@@ -51,14 +49,13 @@ class RatInput(nn.Module):
 
     def __init__(self, config: RatConfig, num_outputs):
         super().__init__()
-        self.rat_norm_eps = config.rat_norm_eps
 
         self.hidden_size = config.hidden_size
-        self.residual_multiplier = config.residual_multiplier
-        self.residual_size = self.hidden_size * self.residual_multiplier
+        self.residual_channels = config.residual_channels
+        self.residual_size = self.hidden_size * self.residual_channels
         
-        self.residual_groups = config.residual_groups
-        assert self.hidden_size % self.residual_groups == 0
+        self.residual_heads = config.residual_heads
+        assert self.hidden_size % self.residual_heads == 0
 
         self.num_outputs = num_outputs
         self.output_size = self.hidden_size * self.num_outputs
@@ -69,12 +66,14 @@ class RatInput(nn.Module):
             groups=self.residual_groups
         )
 
-        self.norm = nn.LayerNorm(self.hidden_size, eps=config.layer_norm_eps, elementwise_affine=False)
-        self.scales = nn.Parameter(torch.ones(1, 1, self.num_outputs, self.hidden_size))
-        self.bias = nn.Parameter(torch.zeros(1, 1, self.num_outputs, self.hidden_size))
+        self.norm = nn.GroupNorm(
+            self.num_outputs,
+            self.output_size,
+            eps=config.layer_norm_eps
+        )
 
 
-    def forward(self, hidden_states):
+    def compute(self, hidden_states):
         bs, l, _ = hidden_states.shape
 
         # [B, L, HN]
@@ -298,7 +297,7 @@ class RatTransformer(BaseTransformer):
 
 
 class RatLmModel(BaseLmModel):
-    
+
     transformer_type = RatTransformer
 
     requires_barrier = True

@@ -14,6 +14,8 @@ try:
 except:
     pass
 
+from utils.logging_utils import log_master_print
+
 
 def _extract_tensors_from_list(inputs):
     tensor_inputs = []
@@ -30,7 +32,8 @@ def _extract_tensors_from_list(inputs):
 
 
 def checkpoint_barrier(inputs):
-    xm.optimization_barrier_(
+    log_master_print("checkpoint_barrier")
+    return xm.optimization_barrier(
         _extract_tensors_from_list(inputs)
     )
 
