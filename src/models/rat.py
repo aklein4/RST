@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 from models.base import (
     BaseConfig, BaseTransformer, BaseLmModel,
     BaseAttention, BaseMLP
@@ -19,14 +21,16 @@ class RatConfig(BaseConfig):
         self,
         residual_channels: int = 4,
         residual_heads: int = 16,
-        dot_norm_eps: float = 1e-5,
+        delta_rank: int = 8,
+        ssm_eps: float = 1e-5,
         *args,
         **kwargs,
     ):
         
         self.residual_channels = residual_channels
         self.residual_heads = residual_heads
-        self.dot_norm_eps = dot_norm_eps
+        self.delta_rank = delta_rank
+        self.ssm_eps = ssm_eps
 
         super().__init__(*args, **kwargs)
 
@@ -35,18 +39,9 @@ class RatRead(nn.Module):
 
 
     def special_init_weights(self, config):
-        self.conv.weight.data.normal_()
-        self.post_step()
-
-
-    def post_step(self):
-        self.conv.weight.data[:] = (
-            self.conv.weight.data / 
-            (
-                self.conv.weight.data.norm(p=2, dim=1, keepdim=True) +
-                self.rat_norm_eps
-            )
-        ).detach()
+        self.conv.weight.data.normal_(
+            0.0, 1 / np.sqrt(config.residual_channels)
+        )
 
 
     def __init__(self, config: RatConfig, num_outputs):
@@ -91,7 +86,11 @@ class RatRead(nn.Module):
             .reshape(bs, l, self.output_size)
         )
 
-        return self.norm(hidden_states)
+        hidden_states = hidden_states.view(bs*l, self.output_size)
+        hidden_states = self.norm(hidden_states)
+        hidden_states = hidden_states.view(bs, l, self.output_size)
+    
+        return hidden_states
     
 
     def forward(self, hidden_states):
@@ -100,23 +99,30 @@ class RatRead(nn.Module):
 
 class RatWrite(nn.Module):
 
+
     def special_init_weights(self, config):
+        # o_d are both fine, no bias
 
-        # TODO: is this is best way?
-        self.A.data.normal_(0.0, config.initializer_range)
-
+        # zero on up rank
         self.delta_up.weight.data.zero_()
 
         # TODO: this is hardcoded from MAMBA
         t = 0.001 + (
             torch.rand_like(self.delta_up.bias.data) * (0.1 - 0.001)
         )
-
-        # residual gets t=1
-        t[..., self.half_size:].fill_(1.0)
-
         self.delta_up.bias.data = torch.log(t.exp() - 1)
 
+        # TODO: is this is best way?
+        self.WA_WB.weight.data.zero_()
+
+        self.WA_WB.bias.data.zero_()
+        self.WA_WB.bias.data[:self.A_size].normal_(
+            0.0, config.initializer_range
+        )
+        self.WA_WB.bias.data[self.A_size:].normal_(
+            0.0, 1 / np.sqrt(config.residual_channels)
+        )
+        
 
     def __init__(self, config, y_size):
         super().__init__()
@@ -124,15 +130,17 @@ class RatWrite(nn.Module):
         self.hidden_size = config.hidden_size
         self.residual_channels = config.residual_channels
         self.residual_heads = config.residual_heads
-        
+        self.residual_size = self.hidden_size * self.residual_channels
+
         self.head_size = self.hidden_size // self.residual_heads
         assert self.hidden_size % self.residual_heads == 0
         
-        self.A_size = (1 - self.residual_channels) * self.residual_heads
+        self.A_size = (self.residual_channels - 1) * self.residual_heads
         self.B_size = self.residual_channels * self.residual_heads
 
         self.y_size = y_size
-        self.ssm_epsilon = config.ssm_epsilon
+        self.ssm_eps = config.ssm_eps
+        self.delta_rank = config.delta_rank
 
         # projections for y
         self.Wo_Wd = nn.Linear(self.y_size, self.hidden_size + config.delta_rank, bias=False)
@@ -146,14 +154,17 @@ class RatWrite(nn.Module):
         bs, l, _ = hidden_states.shape
 
         # split o_d
-        out = o_d[:, :, :self.hidden_size]
-        delta_low = o_d[:, :, self.hidden_size:]
+        out, delta_low = torch.split(
+            o_d, [self.hidden_size, self.delta_rank], dim=-1
+        )
 
         # split A_B
-        A_logit = A_B[:, :, :self.A_size] # A_size
-        B_raw = A_B[:, :, self.A_size:] # B_size
-        B_proj = B_raw[:, :, :self.A_size] # A_size
-        B_skip = B_raw[:, :, self.A_size:] # heads
+        A_logit, B_raw = torch.split(
+            A_B, [self.A_size, self.B_size], dim=-1
+        )
+        B_proj, B_skip = torch.split(
+            B_raw, [self.A_size, self.residual_heads], dim=-1
+        )
 
         # get delta
         delta = self.delta_up(delta_low)
@@ -162,39 +173,88 @@ class RatWrite(nn.Module):
         # reshape for SSM
         hidden_states = hidden_states.view(bs, l, self.head_size, self.residual_heads, self.residual_channels)
         out = out.view(bs, l, self.head_size, self.residual_heads, 1)
+        
         delta = delta.view(bs, l, self.head_size, self.residual_heads, 1)
-        A_logit = A_logit.view(bs, l, self.head_size, 1, self.residual_channels-1)
-        B_proj = B_proj.view(bs, l, self.head_size, 1, self.residual_channels-1)
-        B_skip = B_skip.view(bs, l, self.head_size, 1, 1)
+        
+        A_logit = A_logit.view(bs, l, 1, self.residual_heads, self.residual_channels-1)
+        B_proj = B_proj.view(bs, l, 1, self.residual_heads, self.residual_channels-1)
+        B_skip = B_skip.view(bs, l, 1, self.residual_heads, 1)
 
         # calculate SSM matrices
         A_neg = -F.softplus(A_logit)
-        A_bar = torch.exp(delta[:, :, :self.half_size] * A_neg)
+        A_bar = torch.exp(delta * A_neg)
         
-        B_bar = (A_bar - 1) / (A_neg - self.ssm_epsilon)
+        B_bar = (A_bar - 1) / (A_neg - self.ssm_eps) * B_proj
         B_bar_skip = delta * B_skip
 
         # add residuals
-        A_bar = torch.cat([A_bar, torch.ones_like(A_bar[:, :, :, :1])], dim=-1)
+        A_bar = torch.cat([A_bar, torch.ones_like(A_bar[:, :, :, :, :1])], dim=-1)
         B_bar = torch.cat([B_bar, B_bar_skip], dim=-1)
 
         out = hidden_states * A_bar + out * B_bar
 
-        return out.view(bs, l, self.hidden_size)
+        return out.view(bs, l, self.residual_size)
 
 
     def forward(self, hidden_states, y):
 
         # do major projections
-        o_d = self.W(y)
+        o_d = self.Wo_Wd(y)
         A_B = self.WA_WB(y)
 
         return fast_checkpoint(self.compute, hidden_states, o_d, A_B)
 
 
+class RatEmbedding(nn.Module):
+
+
+    def special_init_weights(self, config):
+        v = self.proj.weight.data.view(
+            self.num_embeddings,
+            1,
+            self.residual_heads,
+            self.residual_channels
+        )
+
+        v[..., :-1].zero_()
+        v[..., -1].fill_(1.0)  
+
+
+    def __init__(self, num_embeddings, hidden_size, residual_channels, residual_heads):
+        super().__init__()
+
+        self.num_embeddings = num_embeddings
+
+        self.hidden_size = hidden_size
+        self.residual_channels = residual_channels
+        self.residual_heads = residual_heads
+        self.residual_size = hidden_size * residual_channels
+
+        self.head_size = hidden_size // residual_heads
+        assert hidden_size % residual_heads == 0
+
+        self.embedding = nn.Embedding(num_embeddings, hidden_size)
+        self.proj = nn.Embedding(num_embeddings, residual_heads * residual_channels)
+    
+
+    def forward(self, input_ids):
+        bs, l = input_ids.shape
+
+        out = self.embedding(input_ids)
+        proj = self.proj(input_ids)
+
+        out = out.view(bs, l, self.head_size, self.residual_heads, 1)
+        proj = proj.view(bs, l, 1, self.residual_heads, self.residual_channels)
+
+        hidden_states = out * proj
+        hidden_states = hidden_states.view(bs, l, self.residual_size)
+
+        return hidden_states
+
+
 class RatAttention(BaseAttention):
 
-    def _init_qkv_proj(self, config):
+    def init_qkv_proj(self, config):
         self.qkv_proj = nn.Conv1d(
             3 * config.hidden_size, 3 * config.hidden_size,
             kernel_size=1, bias=config.use_qkv_bias,
@@ -202,7 +262,7 @@ class RatAttention(BaseAttention):
         )
     
 
-    def _get_qkv(self, hidden_states):
+    def get_qkv(self, hidden_states):
         bs, l, _ = hidden_states.shape
 
         hidden_states = hidden_states.view(bs*l, 3 * self.hidden_size, 1)
@@ -212,9 +272,17 @@ class RatAttention(BaseAttention):
         return hidden_states.chunk(3, dim=-1)
 
 
+    def init_o_proj(self, config):
+        pass
+    
+
+    def get_o(self, hidden_states):
+        return hidden_states
+
+
 class RatMLP(BaseMLP):
 
-    def _init_mlp_input(self, config):
+    def init_mlp_input(self, config):
         self.in_proj = nn.Conv1d(
             2*config.hidden_size, 2*config.mlp_size,
             kernel_size=1, bias=False,
@@ -222,7 +290,7 @@ class RatMLP(BaseMLP):
         )
 
     
-    def _get_mlp_input(self, hidden_states):
+    def get_mlp_input(self, hidden_states):
         bs, l, _ = hidden_states.shape
 
         hidden_states = hidden_states.view(bs*l, 2 * self.hidden_size, 1)
@@ -232,29 +300,30 @@ class RatMLP(BaseMLP):
         return hidden_states.chunk(2, dim=-1)
 
 
+    def init_mlp_output(self, config):
+        pass
+
+
+    def get_mlp_output(self, hidden_states):
+        return hidden_states
+
+
 class RatLayer(nn.Module):
 
-    # @ torch.no_grad()()
+
     def special_init_weights(self, config: BaseConfig):
         if config.identity_init:
-            self.attn.o_proj.weight.data.zero_()
-            self.mlp.down_proj.weight.data.zero_()
+            raise ValueError("identity_init not supported for RatLayer!")
 
-        self.attn_input.special_init_weights(config)
-        self.mlp_input.special_init_weights(config)
+        self.attn_read.special_init_weights(config)
+        self.mlp_read.special_init_weights(config)
 
-        self.attn_output.special_init_weights(config)
-        self.mlp_output.special_init_weights(config)
+        self.attn_write.special_init_weights(config)
+        self.mlp_write.special_init_weights(config)
 
 
-    # @ torch.no_grad()()
     def post_step(self):
-        
-        self.attn_input.post_step()
-        self.mlp_input.post_step()
-
-        self.attn_output.post_step()
-        self.mlp_output.post_step()
+        pass
 
 
     def __init__(self, config: BaseConfig, layer_idx: int):
@@ -265,11 +334,11 @@ class RatLayer(nn.Module):
         self.attn = RatAttention(config, layer_idx)
         self.mlp = RatMLP(config)
 
-        self.attn_input = RatInput(config, 3)
-        self.mlp_input = RatInput(config, 2)
+        self.attn_read = RatRead(config, 3)
+        self.mlp_read = RatRead(config, 2)
 
-        self.attn_output = RatOutput(config)
-        self.mlp_output = RatOutput(config)
+        self.attn_write = RatWrite(config, self.hidden_size)
+        self.mlp_write = RatWrite(config, config.mlp_size)
 
 
     def forward(
@@ -282,61 +351,42 @@ class RatLayer(nn.Module):
 
         # Self Attention
         attn_out = self.attn(
-            self.attn_input(hidden_states),
+            self.attn_read(hidden_states),
             position_ids,
             attention_mask,
             past_key_value=past_key_value
         )
-        hidden_states = hidden_states + self.attn_output(attn_out)
+        hidden_states = self.attn_write(hidden_states, attn_out)
 
         # GLU MLP
         mlp_out = self.mlp(
-            self.mlp_input(hidden_states)
+            self.mlp_read(hidden_states)
         )
-        hidden_states = hidden_states + self.mlp_output(mlp_out)
+        hidden_states = self.mlp_write(hidden_states, mlp_out)
 
         return hidden_states
 
 
 class RatTransformer(BaseTransformer):
+    
     layer_type = RatLayer
 
-    def get_norm(self, config):
-        self.proj_in = RatOutput(config)
-        self.pos_in = RatOutput(config)
-        self.norm = RatInput(config, 1)
+
+    def get_extras(self, config):
+        self.vocab_embs = RatEmbedding(
+            config.vocab_size, config.hidden_size,
+            config.residual_channels, config.residual_heads
+        )
+
+        self.norm = RatRead(config, 1)
 
 
     # @ torch.no_grad()()
     def special_init_weights(self, config):
         super().special_init_weights(config)
 
-        self.proj_in.special_init_weights(config)
-        self.pos_in.special_init_weights(config)
+        self.vocab_embs.special_init_weights(config)
         self.norm.special_init_weights(config)
-    
-
-    # @ torch.no_grad()()
-    def post_step(self):
-        super().post_step()
-
-        self.proj_in.post_step()
-        self.pos_in.post_step()
-        self.norm.post_step()
-
-    
-    def get_hidden_states(
-        self,
-        input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor
-    ) -> torch.Tensor:
-        tokens = self.vocab_embs(input_ids)
-        pos = self.pos_embs(position_ids)
-
-        return (
-            self.proj_in(tokens) +
-            self.pos_in(pos)
-        )
 
 
 class RatLmModel(BaseLmModel):
@@ -344,3 +394,4 @@ class RatLmModel(BaseLmModel):
     transformer_type = RatTransformer
 
     requires_barrier = True
+    
