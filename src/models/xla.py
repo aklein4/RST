@@ -33,6 +33,11 @@ class XLAModel(PreTrainedModel):
 
     requires_barrier = False
 
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={}):
+        log_print(f"Gradient checkpointing enabled for {self.__class__.__name__}!")
+
+
     def __init__(self, *args, fast_start=False, **kwargs):
         super().__init__(*args, **kwargs)
 
