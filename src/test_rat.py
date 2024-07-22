@@ -49,16 +49,31 @@ def main():
     model.post_step()
 
     out = model(x)
-
-    # print(out)
-    print(out.shape)
-
     loss = out.sum()
+    print(" ====== ")
     loss.backward()
+    grads = {k: v.grad for k, v in model.named_parameters()}
 
-    print(model.model.tracker.normalizer)
-    print(model.model.tracker.tracked)
+    for p in model.parameters():
+        p.grad = None
 
+    model.model.enable_debug()
+    new_out = model(x)
+    loss = new_out.sum()
+    loss.backward()
+    new_grads = {k: v.grad for k, v in model.named_parameters()}
+
+    for g, ng in zip(grads.items(), new_grads.items()):
+        name, grad = g
+        nname, ngrad = ng
+
+        assert name == nname
+        try:
+            print(f"{name}: {(ngrad - grad).abs().max()}")
+        except:
+            print(f"{name} not found!")
+
+    print(f"Output: {(out - new_out).abs().max()}")
 
 if __name__ == '__main__':
     main()

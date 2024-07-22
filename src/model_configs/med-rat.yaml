@@ -25,6 +25,7 @@ identity_init: false
 
 residual_channels: 8
 normalizer_eps: 0.00001
+bootstrap_debug: true
 
 ignore_segment_ids: false
 

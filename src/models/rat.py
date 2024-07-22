@@ -27,12 +27,14 @@ class RatConfig(BaseConfig):
         self,
         residual_channels: int = 4,
         normalizer_eps: float = 1e-5,
+        bootstrap_debug: bool = False,
         *args,
         **kwargs,
     ):
         
         self.residual_channels = residual_channels
         self.normalizer_eps = normalizer_eps
+        self.bootstrap_debug = bootstrap_debug
 
         super().__init__(*args, **kwargs)
 
@@ -128,6 +130,8 @@ class Block(nn.Module):
             groups=self.hidden_size
         )
 
+        self.debug = False
+
 
     def get_normalizer(self, ref):
         ones = torch.ones(1, self.hidden_size, 1, dtype=ref.dtype, device=ref.device)
@@ -175,7 +179,21 @@ class Block(nn.Module):
 
 
     def forward(self, x, normalizer, kwargs):
+        if self.debug:
+            return self.debug_forward(x, normalizer, kwargs)
         return bootstrap_fn.apply(x, normalizer, self, self.tracker, kwargs) # torch.is_grad_enabled())
+
+
+    def debug_forward(self, s, normalizer, kwargs):
+        
+        x = self.read(s, normalizer)
+        y = self.compute(x, kwargs)
+        a = self.write(y)
+
+        s_new = s + a
+        new_norm = normalizer + self.get_normalizer(s_new)
+
+        return s_new, new_norm
 
 
 class bootstrap_fn(torch.autograd.Function):    
@@ -375,6 +393,11 @@ class RatLayer(nn.Module):
         pass
 
 
+    def enable_debug(self):
+        self.attn_block.debug = True
+        self.mlp_block.debug = True
+
+
     def __init__(self, config: BaseConfig, layer_idx: int, tracker):
         super().__init__()
 
@@ -443,6 +466,11 @@ class RatTransformer(BaseTransformer):
         )
 
 
+    def enable_debug(self):
+        for layer in self.layers:
+            layer.enable_debug()
+
+
     def __init__(self, config: RatConfig):
         nn.Module.__init__(self)
 
@@ -480,6 +508,10 @@ class RatTransformer(BaseTransformer):
         self.gradient_checkpointing_layers = config.gradient_checkpointing_layers
         if self.gradient_checkpointing:
             raise ValueError("Gradient Checkpointing not supported for RatTransformer!")
+
+        self.debug = config.bootstrap_debug
+        if self.debug:
+            self.enable_debug()
 
 
     def get_output(
