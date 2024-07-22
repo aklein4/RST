@@ -50,12 +50,13 @@ def main():
 
     out = model(x)
     loss = out.sum()
-    print(" ====== ")
     loss.backward()
     grads = {k: v.grad for k, v in model.named_parameters()}
 
     for p in model.parameters():
         p.grad = None
+
+    print(" ================= ")
 
     model.model.enable_debug()
     new_out = model(x)

@@ -20,7 +20,7 @@ use_rope: true
 rope_fraction: 2
 rope_base: 10000
 
-initializer_range: 1.0 # 0.02
+initializer_range: 0.02
 identity_init: false
 
 residual_channels: 4
