@@ -51,6 +51,7 @@ class XLAModel(PreTrainedModel):
 
         super().init_weights()
         self.special_init_weights()
+        self.post_step()
 
 
     def special_init_weights(self):

@@ -99,6 +99,13 @@ class Block(nn.Module):
         )
 
 
+    def post_step(self):
+        self.down.weight.data[:] = (
+            self.down.weight.data /
+            (self.down.weight.data.norm(dim=1, keepdim=True) + self.normalizer_eps)
+        ).detach()
+
+
     def __init__(self, config, operation, tracker, num_inputs):
         super().__init__()
 
@@ -147,7 +154,7 @@ class Block(nn.Module):
 
         normalizer = normalizer.view(1, self.residual_size, 1)
         normalizer = self.down(normalizer)
-        # x = x / (normalizer + self.normalizer_eps)
+        x = x / normalizer
 
         x = (
             x
@@ -390,7 +397,8 @@ class RatLayer(nn.Module):
 
 
     def post_step(self):
-        pass
+        self.attn_block.post_step()
+        self.mlp_block.post_step()
 
 
     def enable_debug(self):
@@ -471,6 +479,15 @@ class RatTransformer(BaseTransformer):
             layer.enable_debug()
 
 
+    def post_step(self):
+        super().post_step()
+
+        self.final_down.weight.data[:] = (
+            self.final_down.weight.data /
+            (self.final_down.weight.data.norm(dim=1, keepdim=True) + self.normalizer_eps)
+        ).detach()
+
+
     def __init__(self, config: RatConfig):
         nn.Module.__init__(self)
 
@@ -526,7 +543,7 @@ class RatTransformer(BaseTransformer):
 
         normalizer = normalizer.view(1, self.residual_size, 1)
         normalizer = self.final_down(normalizer)
-        hidden_states = hidden_states / (normalizer + self.normalizer_eps)
+        hidden_states = hidden_states / normalizer
 
         hidden_states = hidden_states.view(bs, l, self.hidden_size)
         hidden_states = self.norm(hidden_states)
