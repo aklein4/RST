@@ -4,13 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import torch_xla.core.xla_model as xm
+except:
+    pass
+
 import numpy as np
 
 from models.base import (
     BaseConfig, BaseTransformer, BaseLmModel,
     BaseAttention, BaseMLP
 )
-from utils.model_utils import fast_checkpoint
+from utils.model_utils import _extract_tensors_from_list
+import utils.constants as constants
 
 
 class RatConfig(BaseConfig):
@@ -20,236 +26,298 @@ class RatConfig(BaseConfig):
     def __init__(
         self,
         residual_channels: int = 4,
-        residual_heads: int = 16,
-        delta_rank: int = 8,
-        ssm_eps: float = 1e-5,
+        normalizer_eps: float = 1e-5,
         *args,
         **kwargs,
     ):
         
         self.residual_channels = residual_channels
-        self.residual_heads = residual_heads
-        self.delta_rank = delta_rank
-        self.ssm_eps = ssm_eps
+        self.normalizer_eps = normalizer_eps
 
         super().__init__(*args, **kwargs)
 
 
-class RatRead(nn.Module):
+class Tracker(nn.Module):
 
+    def __init__(self):
+        super().__init__()
+        self.tracked = None
+        self.normalizer = None
+    
+    def forward(self, x, normalizer):
+        return track_fn.apply(x, normalizer, self)
+
+
+    def get(self):
+        return self.tracked
+
+    def update(self, x):
+        self.tracked = x.detach()
+
+
+    def get_normalizer(self):
+        return self.normalizer
+    
+    def update_normalizer(self, x):
+        self.normalizer = x.detach()
+
+
+    def clear(self):
+        self.tracked = None
+        self.normalizer = None
+
+
+class track_fn(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x, normalizer, tracker):
+        ctx.tracker = tracker
+
+        tracker.update(x)
+        tracker.update_normalizer(normalizer)
+        return x, normalizer
+
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, grad_output, norm_output):
+
+        ctx.tracker.clear()
+        return (grad_output, norm_output) + (None,)
+
+
+class Block(nn.Module):
 
     def special_init_weights(self, config):
-        self.conv.weight.data.normal_(
+        self.down.weight.data.normal_(
+            0.0, 1 / np.sqrt(config.residual_channels)
+        )
+        self.up.weight.data.normal_(
             0.0, 1 / np.sqrt(config.residual_channels)
         )
 
 
-    def __init__(self, config: RatConfig, num_outputs):
+    def __init__(self, config, operation, tracker, num_inputs):
         super().__init__()
 
         self.hidden_size = config.hidden_size
         self.residual_channels = config.residual_channels
+        self.num_inputs = num_inputs
+
         self.residual_size = self.hidden_size * self.residual_channels
-        
-        self.residual_heads = config.residual_heads
-        assert self.hidden_size % self.residual_heads == 0
+        self.input_size = self.hidden_size * self.num_inputs
 
-        self.num_outputs = num_outputs
-        self.output_size = self.hidden_size * self.num_outputs
+        self.operation = operation
+        self.tracker = tracker
 
-        self.conv = nn.Conv1d(
-            self.residual_size, self.output_size,
+        self.normalizer_eps = config.normalizer_eps
+
+        self.down = nn.Conv1d(
+            self.residual_size, self.input_size,
+            kernel_size=1, bias=False,
+            groups=self.hidden_size
+        )
+        self.norm = nn.GroupNorm(
+            self.num_inputs,
+            self.input_size,
+            eps=config.layer_norm_eps
+        )
+        self.up = nn.Conv1d(
+            self.hidden_size, self.residual_size,
             kernel_size=1, bias=False,
             groups=self.hidden_size
         )
 
-        self.norm = nn.GroupNorm(
-            self.num_outputs,
-            self.output_size,
-            eps=config.layer_norm_eps
-        )
 
+    def get_normalizer(self, ref):
+        ones = torch.ones(1, self.hidden_size, 1, dtype=ref.dtype, device=ref.device)
+        normalizer = self.up(ones)
+        return normalizer
 
-    def compute(self, hidden_states):
-        bs, l, _ = hidden_states.shape
+    
+    def read(self, x, normalizer):
+        bs, l, _ = x.shape
 
-        # [B, L, HN]
-        hidden_states = hidden_states.view(bs*l, self.residual_size, 1)
-        hidden_states = self.conv(hidden_states)
-        hidden_states = hidden_states.view(bs, l, self.output_size)
+        x = x.view(bs*l, self.residual_size, 1)
+        x = self.down(x)
 
-        # [B, L, N, H]
-        hidden_states = (
-            hidden_states
-            .view(bs, l, self.hidden_size, self.num_outputs)
+        normalizer = normalizer.view(1, self.residual_size, 1)
+        normalizer = self.down(normalizer)
+        x = x / (normalizer + self.normalizer_eps)
+
+        x = (
+            x
+            .view(bs, l, self.hidden_size, self.num_inputs)
             .permute(0, 1, 3, 2)
-            .reshape(bs, l, self.output_size)
+            .reshape(bs, l, self.input_size)
         )
 
-        hidden_states = hidden_states.view(bs*l, self.output_size)
-        hidden_states = self.norm(hidden_states)
-        hidden_states = hidden_states.view(bs, l, self.output_size)
+        x = x.view(bs*l, self.input_size)
+        x = self.norm(x)
+        x = x.view(bs, l, self.input_size)
+
+        return x
     
-        return hidden_states
+
+    def write(self, x):
+        bs, l, _ = x.shape
+
+        x = x.view(bs*l, self.hidden_size, 1)
+        x = self.up(x)
+
+        x = x.view(bs, l, self.residual_size)
+
+        return x
+
+
+    def compute(self, x, kwargs):
+        return self.operation(x, **kwargs)
+
+
+    def forward(self, x, normalizer, kwargs):
+        return bootstrap_fn.apply(x, normalizer, self, self.tracker, kwargs) # torch.is_grad_enabled())
+
+
+class bootstrap_fn(torch.autograd.Function):    
+
+    @staticmethod
+    def forward(ctx, s, normalizer, block: Block, tracker, kwargs):
+
+        ctx.gpu_autocast_kwargs = {
+            "enabled": torch.is_autocast_enabled(),
+            "dtype": torch.get_autocast_gpu_dtype(),
+            "cache_enabled": torch.is_autocast_cache_enabled()
+        }
+        ctx.cpu_autocast_kwargs = {
+            "enabled": torch.is_autocast_cpu_enabled(),
+            "dtype": torch.get_autocast_cpu_dtype(),
+            "cache_enabled": torch.is_autocast_cache_enabled()
+        }
+
+        # get x (no grad, s not saved)
+        x = block.read(s, normalizer)
+        x.requires_grad = True
+
+        # get y, and link to x
+        with torch.enable_grad():
+            y = block.compute(x, kwargs)
+
+        # get a (no grad, doesn't matter we save y anyway)
+        a = block.write(y)
+
+        # add residual
+        s_new = s + a
+
+        # add keys
+        new_norm = normalizer + block.get_normalizer(s)
+
+        # save things
+        ctx.save_for_backward(x, y)
+        ctx.block = block
+        ctx.tracker = tracker
+        tracker.update(s_new)
+        tracker.update_normalizer(new_norm)
+
+        s_new.requires_grad = True
+        new_norm.requires_grad = True
+        return s_new, new_norm
+
     
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, grad_output, norm_output):
+        x, y = ctx.saved_tensors
 
-    def forward(self, hidden_states):
-        return fast_checkpoint(self.compute, hidden_states)
+        if constants.XLA_AVAILABLE:
+            xm.optimization_barrier_(
+                _extract_tensors_from_list(
+                    [x, y, grad_output, norm_output] +
+                    list(ctx.block.parameters()) +
+                    list(ctx.block.buffers()) +
+                    [ctx.tracker.get(), ctx.tracker.get_normalizer()]
+                )
+            )
 
+        # get a, populate x with gradient
+        with torch.enable_grad(), \
+            torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs), \
+            torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):
+                a = ctx.block.write(y)
+                new_norm = ctx.block.get_normalizer(a)
+        torch.autograd.backward(a, grad_output)
+        torch.autograd.backward(new_norm, norm_output)
 
-class RatWrite(nn.Module):
+        # reconstruct orignal input
+        s = (ctx.tracker.get() - a).detach()
+        normalizer = (ctx.tracker.get_normalizer() - new_norm).detach()
 
+        # reconstruct x and populate s with gradient
+        with torch.enable_grad(), \
+            torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs), \
+            torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):
+                s.requires_grad = True
+                normalizer.requires_grad = True
+                new_x = ctx.block.read(s, normalizer)
+        torch.autograd.backward(new_x, x.grad)
 
-    def special_init_weights(self, config):
-        # o_d are both fine, no bias
+        # save s for previous block
+        ctx.tracker.update(s)
+        ctx.tracker.update_normalizer(normalizer)
 
-        # zero on up rank
-        self.delta_up.weight.data.zero_()
+        # add grad to residual
+        grad_output = grad_output + s.grad
+        norm_output = norm_output + normalizer.grad
 
-        # TODO: this is hardcoded from MAMBA
-        t = 0.001 + (
-            torch.rand_like(self.delta_up.bias.data) * (0.1 - 0.001)
-        )
-        self.delta_up.bias.data = torch.log(t.exp() - 1)
-
-        # TODO: is this is best way?
-        self.WA_WB.weight.data.zero_()
-
-        self.WA_WB.bias.data.zero_()
-        self.WA_WB.bias.data[:self.A_size].normal_(
-            0.0, config.initializer_range
-        )
-        self.WA_WB.bias.data[self.A_size:].normal_(
-            0.0, 1 / np.sqrt(config.residual_channels)
-        )
-        
-
-    def __init__(self, config, y_size):
-        super().__init__()
-
-        self.hidden_size = config.hidden_size
-        self.residual_channels = config.residual_channels
-        self.residual_heads = config.residual_heads
-        self.residual_size = self.hidden_size * self.residual_channels
-
-        self.head_size = self.hidden_size // self.residual_heads
-        assert self.hidden_size % self.residual_heads == 0
-        
-        self.A_size = (self.residual_channels - 1) * self.residual_heads
-        self.B_size = self.residual_channels * self.residual_heads
-
-        self.y_size = y_size
-        self.ssm_eps = config.ssm_eps
-        self.delta_rank = config.delta_rank
-
-        # projections for y
-        self.Wo_Wd = nn.Linear(self.y_size, self.hidden_size + config.delta_rank, bias=False)
-        self.WA_WB = nn.Linear(self.y_size, self.A_size + self.B_size, bias=True)
-        
-        # up projection for delta
-        self.delta_up = nn.Linear(config.delta_rank, self.hidden_size, bias=True)
-
-
-    def compute(self, hidden_states, o_d, A_B):
-        bs, l, _ = hidden_states.shape
-
-        # split o_d
-        out, delta_low = torch.split(
-            o_d, [self.hidden_size, self.delta_rank], dim=-1
-        )
-
-        # split A_B
-        A_logit, B_raw = torch.split(
-            A_B, [self.A_size, self.B_size], dim=-1
-        )
-        B_proj, B_skip = torch.split(
-            B_raw, [self.A_size, self.residual_heads], dim=-1
-        )
-
-        # get delta
-        delta = self.delta_up(delta_low)
-        delta = F.softplus(delta)
-
-        # reshape for SSM
-        hidden_states = hidden_states.view(bs, l, self.head_size, self.residual_heads, self.residual_channels)
-        out = out.view(bs, l, self.head_size, self.residual_heads, 1)
-        
-        delta = delta.view(bs, l, self.head_size, self.residual_heads, 1)
-        
-        A_logit = A_logit.view(bs, l, 1, self.residual_heads, self.residual_channels-1)
-        B_proj = B_proj.view(bs, l, 1, self.residual_heads, self.residual_channels-1)
-        B_skip = B_skip.view(bs, l, 1, self.residual_heads, 1)
-
-        # calculate SSM matrices
-        A_neg = -F.softplus(A_logit)
-        A_bar = torch.exp(delta * A_neg)
-        
-        B_bar = (A_bar - 1) / (A_neg - self.ssm_eps) * B_proj
-        B_bar_skip = delta * B_skip
-
-        # add residuals
-        A_bar = torch.cat([A_bar, torch.ones_like(A_bar[:, :, :, :, :1])], dim=-1)
-        B_bar = torch.cat([B_bar, B_bar_skip], dim=-1)
-
-        out = hidden_states * A_bar + out * B_bar
-
-        return out.view(bs, l, self.residual_size)
-
-
-    def forward(self, hidden_states, y):
-
-        # do major projections
-        o_d = self.Wo_Wd(y)
-        A_B = self.WA_WB(y)
-
-        return fast_checkpoint(self.compute, hidden_states, o_d, A_B)
+        return (grad_output, norm_output) + (None,)*3
 
 
 class RatEmbedding(nn.Module):
 
-
     def special_init_weights(self, config):
-        v = self.proj.weight.data.view(
-            self.num_embeddings,
-            1,
-            self.residual_heads,
-            self.residual_channels
+        self.up.weight.data.normal_(
+            0.0, 1 / np.sqrt(config.residual_channels)
         )
 
-        v[..., :-1].zero_()
-        v[..., -1].fill_(1.0)  
+
+    def get_normalizer(self, ref):
+        ones = torch.ones(1, self.hidden_size, 1, dtype=ref.dtype, device=ref.device)
+        normalizer = self.up(ones)
+        return normalizer
 
 
-    def __init__(self, num_embeddings, hidden_size, residual_channels, residual_heads):
+    def __init__(self, num_embeddings, hidden_size, residual_channels, tracker):
         super().__init__()
 
         self.num_embeddings = num_embeddings
-
         self.hidden_size = hidden_size
+
         self.residual_channels = residual_channels
-        self.residual_heads = residual_heads
         self.residual_size = hidden_size * residual_channels
 
-        self.head_size = hidden_size // residual_heads
-        assert hidden_size % residual_heads == 0
+        self.tracker = tracker
 
-        self.embedding = nn.Embedding(num_embeddings, hidden_size)
-        self.proj = nn.Embedding(num_embeddings, residual_heads * residual_channels)
+        self.embedding = nn.Embedding(
+            num_embeddings, hidden_size
+        )
+
+        self.up = nn.Conv1d(
+            self.hidden_size, self.residual_size,
+            kernel_size=1, bias=False,
+            groups=self.hidden_size
+        )
     
 
     def forward(self, input_ids):
         bs, l = input_ids.shape
 
         out = self.embedding(input_ids)
-        proj = self.proj(input_ids)
 
-        out = out.view(bs, l, self.head_size, self.residual_heads, 1)
-        proj = proj.view(bs, l, 1, self.residual_heads, self.residual_channels)
+        out = out.view(bs*l, self.hidden_size, 1)
+        out = self.up(out)
 
-        hidden_states = out * proj
-        hidden_states = hidden_states.view(bs, l, self.residual_size)
+        out = out.view(bs, l, self.residual_size)
 
-        return hidden_states
+        return out
 
 
 class RatAttention(BaseAttention):
@@ -272,14 +340,6 @@ class RatAttention(BaseAttention):
         return hidden_states.chunk(3, dim=-1)
 
 
-    def init_o_proj(self, config):
-        pass
-    
-
-    def get_o(self, hidden_states):
-        return hidden_states
-
-
 class RatMLP(BaseMLP):
 
     def init_mlp_input(self, config):
@@ -300,14 +360,6 @@ class RatMLP(BaseMLP):
         return hidden_states.chunk(2, dim=-1)
 
 
-    def init_mlp_output(self, config):
-        pass
-
-
-    def get_mlp_output(self, hidden_states):
-        return hidden_states
-
-
 class RatLayer(nn.Module):
 
 
@@ -315,56 +367,54 @@ class RatLayer(nn.Module):
         if config.identity_init:
             raise ValueError("identity_init not supported for RatLayer!")
 
-        self.attn_read.special_init_weights(config)
-        self.mlp_read.special_init_weights(config)
-
-        self.attn_write.special_init_weights(config)
-        self.mlp_write.special_init_weights(config)
+        self.attn_block.special_init_weights(config)
+        self.mlp_block.special_init_weights(config)
 
 
     def post_step(self):
         pass
 
 
-    def __init__(self, config: BaseConfig, layer_idx: int):
+    def __init__(self, config: BaseConfig, layer_idx: int, tracker):
         super().__init__()
 
         self.hidden_size = config.hidden_size
 
-        self.attn = RatAttention(config, layer_idx)
-        self.mlp = RatMLP(config)
+        attn = RatAttention(config, layer_idx)
+        mlp = RatMLP(config)
 
-        self.attn_read = RatRead(config, 3)
-        self.mlp_read = RatRead(config, 2)
-
-        self.attn_write = RatWrite(config, self.hidden_size)
-        self.mlp_write = RatWrite(config, config.mlp_size)
+        self.attn_block = Block(config, attn, tracker, 3)
+        self.mlp_block = Block(config, mlp, tracker, 2)
 
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        normalizer: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         past_key_value=None,
     ):
 
         # Self Attention
-        attn_out = self.attn(
-            self.attn_read(hidden_states),
-            position_ids,
-            attention_mask,
-            past_key_value=past_key_value
+        hidden_states, normalizer = self.attn_block(
+            hidden_states,
+            normalizer,
+            {
+                'position_ids': position_ids,
+                'attention_mask': attention_mask,
+                'past_key_value': past_key_value
+            }
         )
-        hidden_states = self.attn_write(hidden_states, attn_out)
 
         # GLU MLP
-        mlp_out = self.mlp(
-            self.mlp_read(hidden_states)
+        hidden_states, normalizer = self.mlp_block(
+            hidden_states, 
+            normalizer,
+            {}
         )
-        hidden_states = self.mlp_write(hidden_states, mlp_out)
 
-        return hidden_states
+        return hidden_states, normalizer
 
 
 class RatTransformer(BaseTransformer):
@@ -373,25 +423,118 @@ class RatTransformer(BaseTransformer):
 
 
     def get_extras(self, config):
-        self.vocab_embs = RatEmbedding(
-            config.vocab_size, config.hidden_size,
-            config.residual_channels, config.residual_heads
+        self.final_down = nn.Conv1d(
+            self.residual_size, config.hidden_size,
+            kernel_size=1, bias=False,
+            groups=config.hidden_size
         )
+        self.normalizer_eps = config.normalizer_eps
 
-        self.norm = RatRead(config, 1)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
 
-    # @ torch.no_grad()()
     def special_init_weights(self, config):
         super().special_init_weights(config)
 
         self.vocab_embs.special_init_weights(config)
-        self.norm.special_init_weights(config)
+
+        self.final_down.weight.data.normal_(
+            0.0, 1 / np.sqrt(config.residual_channels)
+        )
+
+
+    def __init__(self, config: RatConfig):
+        nn.Module.__init__(self)
+
+        # info
+        self.vocab_size = config.vocab_size
+        self.max_sequence_length = config.max_sequence_length
+        
+        self.hidden_size = config.hidden_size
+        self.residual_channels = config.residual_channels
+        self.residual_size = self.hidden_size * self.residual_channels
+
+        self.tracker = Tracker()
+
+        # weights
+        self.vocab_embs = RatEmbedding(
+            config.vocab_size, config.hidden_size,
+            config.residual_channels, self.tracker
+        )
+        
+        self.use_rope = config.use_rope
+        if not config.use_rope:
+            raise ValueError("ONLY Rope supported for RatTransformer!")
+        
+        self.layers = nn.ModuleList(
+            [
+                RatLayer(config, i, self.tracker)
+                for i in range(config.num_layers)
+            ]
+        )
+        
+        self.get_extras(config)
+
+        # Compute configuration
+        self.gradient_checkpointing = config.gradient_checkpointing
+        self.gradient_checkpointing_layers = config.gradient_checkpointing_layers
+        if self.gradient_checkpointing:
+            raise ValueError("Gradient Checkpointing not supported for RatTransformer!")
+
+
+    def get_output(
+        self,
+        hidden_states: torch.Tensor,
+        normalizer: torch.Tensor
+    ):
+        bs, l, _ = hidden_states.shape
+
+        hidden_states = hidden_states.view(bs*l, self.residual_size, 1)
+        hidden_states = self.final_down(hidden_states)
+
+        normalizer = normalizer.view(1, self.residual_size, 1)
+        normalizer = self.final_down(normalizer)
+        hidden_states = hidden_states / (normalizer + self.normalizer_eps)
+
+        hidden_states = hidden_states.view(bs, l, self.hidden_size)
+        hidden_states = self.norm(hidden_states)
+
+        return hidden_states
+    
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        segment_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        kv=None
+    ):
+
+        # get inputs
+        position_ids = self._get_position_ids(input_ids, position_ids)
+        attention_mask = self._get_mask(input_ids, segment_ids)
+        hidden_states = self.get_hidden_states(input_ids, position_ids)
+
+        # start tracking
+        self.tracker.clear()
+        normalizer = self.vocab_embs.get_normalizer(hidden_states)
+        hidden_states, normalizer = self.tracker(hidden_states, normalizer)
+
+        for layer in self.layers:
+            hidden_states, normalizer = layer(
+                hidden_states=hidden_states,
+                normalizer=normalizer,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                past_key_value=kv
+            )
+
+        hidden_states = self.get_output(hidden_states, normalizer)
+
+        return hidden_states
 
 
 class RatLmModel(BaseLmModel):
 
     transformer_type = RatTransformer
-
-    requires_barrier = True
     

@@ -10,10 +10,10 @@ from utils.config_utils import load_model_config
 import utils.constants as constants
 
 
-MODEL_CONFIG = 'med-rat'
+MODEL_CONFIG = 'test-rat'
 BASE_CONFIG = 'med-base'
 
-COMPARE = True
+COMPARE = False
 
 
 def main():
@@ -52,6 +52,12 @@ def main():
 
     # print(out)
     print(out.shape)
+
+    loss = out.sum()
+    loss.backward()
+
+    print(model.model.tracker.normalizer)
+    print(model.model.tracker.tracked)
 
 
 if __name__ == '__main__':
