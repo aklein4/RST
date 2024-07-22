@@ -147,7 +147,7 @@ class Block(nn.Module):
 
         normalizer = normalizer.view(1, self.residual_size, 1)
         normalizer = self.down(normalizer)
-        x = x / (normalizer + self.normalizer_eps)
+        # x = x / (normalizer + self.normalizer_eps)
 
         x = (
             x
