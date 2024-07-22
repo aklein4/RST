@@ -187,6 +187,7 @@ class Block(nn.Module):
     def debug_forward(self, s, normalizer, kwargs):
         
         x = self.read(s, normalizer)
+        x.register_hook(lambda grad: print(grad[0,0,:8]))
         y = self.compute(x, kwargs)
         a = self.write(y)
 
@@ -276,6 +277,7 @@ class bootstrap_fn(torch.autograd.Function):
                 s.requires_grad = True
                 normalizer.requires_grad = True
                 new_x = ctx.block.read(s, normalizer)
+                new_x.register_hook(lambda grad: print(grad[0,0,:8]))
         torch.autograd.backward(new_x, x.grad)
 
         # save s for previous block
