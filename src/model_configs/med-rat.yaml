@@ -24,6 +24,7 @@ initializer_range: 0.02
 identity_init: false
 
 residual_channels: 8
+softplus_init_min: 0.01
 bootstrap_debug: false
 
 ignore_segment_ids: false

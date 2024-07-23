@@ -26,12 +26,14 @@ class RatConfig(BaseConfig):
     def __init__(
         self,
         residual_channels: int = 4,
+        softplus_init_min: float = 0.01,
         bootstrap_debug: bool = False,
         *args,
         **kwargs,
     ):
         
         self.residual_channels = residual_channels
+        self.softplus_init_min = softplus_init_min
         self.bootstrap_debug = bootstrap_debug
 
         super().__init__(*args, **kwargs)
@@ -43,7 +45,7 @@ class RatReader(nn.Module):
         
         # init such that r~1 after softplus
         initer = torch.randn_like(self.q.data) / np.sqrt(config.residual_channels)
-        initer = initer.abs()
+        initer = initer.abs() + config.softplus_init_min
         initer = torch.log(initer.exp() - 1)
         
         self.q.data[:] = initer.detach()
@@ -102,7 +104,7 @@ class RatWriter(nn.Module):
     def special_init_weights(self, config):
         
         initer = torch.randn_like(self.k.data) / np.sqrt(config.residual_channels)
-        initer = initer.abs()
+        initer = initer.abs() + config.softplus_init_min
         initer = torch.log(initer.exp() - 1)
         
         self.k.data[:] = initer.detach()
