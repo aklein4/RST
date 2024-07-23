@@ -17,6 +17,7 @@ except:
 import inspect
 
 from utils.logging_utils import log_master_print
+import utils.constants as constants
 
 
 def _extract_tensors_from_list(inputs):
@@ -114,12 +115,13 @@ class _FastCheckpointFunction(torch.autograd.Function):
     ):
         weights = list(ctx.run_function.__self__.parameters())
         buffers = list(ctx.run_function.__self__.buffers())
-    xm.optimization_barrier_(
-        _extract_tensors_from_list(
-            inputs + list(args) +
-            weights + buffers
+    if constants.XLA_AVAILABLE:
+        xm.optimization_barrier_(
+            _extract_tensors_from_list(
+                inputs + list(args) +
+                weights + buffers
+            )
         )
-    )
 
     detached_inputs = detach_variable(tuple(inputs))
     with torch.enable_grad(), \

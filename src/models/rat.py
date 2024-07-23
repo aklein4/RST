@@ -15,7 +15,7 @@ from models.base import (
     BaseConfig, BaseTransformer, BaseLmModel,
     BaseAttention, BaseMLP
 )
-from utils.model_utils import _extract_tensors_from_list
+from utils.model_utils import _extract_tensors_from_list, fast_checkpoint
 import utils.constants as constants
 
 
@@ -468,7 +468,11 @@ class RatTransformer(BaseTransformer):
         hidden_states: torch.Tensor,
         normalizer: torch.Tensor
     ):
-        return self.main_reader(hidden_states, normalizer)
+        return fast_checkpoint(
+            self.main_reader,
+            hidden_states,
+            normalizer
+        )
     
 
     def forward(
