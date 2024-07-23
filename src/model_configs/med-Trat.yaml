@@ -9,7 +9,7 @@ max_sequence_length: 1024
 hidden_size: 1024
 mlp_size: 2816
 
-num_layers: 23
+num_layers: 22
 num_attention_heads: 16
 
 use_qkv_bias: true
@@ -24,7 +24,7 @@ initializer_range: 0.02
 identity_init: false
 
 residual_channels: 8
-timescale_rank: 64
+timescale_rank: 128
 softplus_init_min: 0.01
 bootstrap_debug: false
 
