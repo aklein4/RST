@@ -26,6 +26,7 @@ class RatConfig(BaseConfig):
     def __init__(
         self,
         residual_channels: int = 4,
+        timescale_rank: int = None,
         softplus_init_min: float = 0.01,
         bootstrap_debug: bool = False,
         *args,
@@ -33,6 +34,7 @@ class RatConfig(BaseConfig):
     ):
         
         self.residual_channels = residual_channels
+        self.timescale_rank = timescale_rank
         self.softplus_init_min = softplus_init_min
         self.bootstrap_debug = bootstrap_debug
 
@@ -109,12 +111,17 @@ class RatWriter(nn.Module):
         
         self.k.data[:] = initer.detach()
 
+        if self.timescale_rank is not None:
+            self.t_up.weight.data.zero_()
+            self.t_up.bias.data.fill_(np.log(np.exp(1) - 1))
 
-    def __init__(self, config):
+
+    def __init__(self, config, raw_size):
         super().__init__()
 
         self.hidden_size = config.hidden_size
         self.residual_channels = config.residual_channels
+        self.raw_size = raw_size
 
         self.residual_size = self.hidden_size * self.residual_channels
 
@@ -125,13 +132,26 @@ class RatWriter(nn.Module):
             )
         )
 
+        self.timescale_rank = config.timescale_rank
+        if self.timescale_rank is not None:
+            self.t_down = nn.Linear(self.raw_size, self.timescale_rank, bias=False)
+            self.t_up = nn.Linear(self.timescale_rank, self.hidden_size, bias=True)
+
     
-    def forward(self, x):
-        return x.unsqueeze(-1) * F.softplus(self.k)
+    def forward(self, x, raw):
+        k_curr = self._get_k(raw)
+
+        return x.unsqueeze(-1) * k_curr, k_curr
     
 
-    def get_normalizer(self):
-        return F.softplus(self.k)
+    def _get_k(self, raw):
+        if self.timescale_rank is None:
+            return F.softplus(self.k)
+
+        t = self.t_up(self.t_down(raw))
+        t_pos = F.softplus(t)
+
+        return t_pos.unsqueeze(-1) * F.softplus(self.k)
 
 
 class Tracker(nn.Module):
@@ -190,14 +210,14 @@ class Block(nn.Module):
         self.writer.special_init_weights(config)
 
 
-    def __init__(self, config, operation, tracker, num_inputs):
+    def __init__(self, config, operation, tracker, num_inputs, raw_size):
         super().__init__()
 
         self.operation = operation
         self.tracker = tracker
 
         self.reader = RatReader(config, num_inputs)
-        self.writer = RatWriter(config)
+        self.writer = RatWriter(config, raw_size)
 
         self.debug = False
 
@@ -215,11 +235,11 @@ class Block(nn.Module):
     def debug_forward(self, s, normalizer, kwargs):
         
         x = self.reader(s, normalizer)
-        y = self.compute(x, kwargs)
-        a = self.writer(y)
+        y, raw = self.compute(x, kwargs)
+        a, k = self.writer(y, raw)
 
         s_new = s + a
-        new_norm = normalizer + self.writer.get_normalizer()
+        new_norm = normalizer + k
 
         return s_new, new_norm
 
@@ -246,19 +266,17 @@ class bootstrap_fn(torch.autograd.Function):
 
         # get y, and link to x
         with torch.enable_grad():
-            y = block.compute(x, kwargs)
+            y, raw = block.compute(x, kwargs)
 
         # get a (no grad, doesn't matter we save y anyway)
-        a = block.writer(y)
+        a, k = block.writer(y, raw)
 
-        # add residual
+        # add outputs to streams
         s_new = s + a
-
-        # add keys
-        new_norm = normalizer + block.writer.get_normalizer()
+        new_norm = normalizer + k
 
         # save things
-        ctx.save_for_backward(x, y)
+        ctx.save_for_backward(x, y, raw) # raw is already saved in compute
         ctx.block = block
         ctx.tracker = tracker
 
@@ -273,7 +291,7 @@ class bootstrap_fn(torch.autograd.Function):
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_output, norm_output):
-        x, y = ctx.saved_tensors
+        x, y, raw = ctx.saved_tensors
 
         if constants.XLA_AVAILABLE:
             xm.optimization_barrier_(
@@ -289,14 +307,12 @@ class bootstrap_fn(torch.autograd.Function):
         with torch.enable_grad(), \
             torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs), \
             torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):
-                a = ctx.block.writer(y)
-                new_norm = ctx.block.writer.get_normalizer()
-        torch.autograd.backward(a, grad_output)
-        torch.autograd.backward(new_norm, norm_output)
+                a, k = ctx.block.writer(y, raw)
+        torch.autograd.backward((a, k), (grad_output, norm_output))
 
         # reconstruct orignal input
         s = (ctx.tracker.get() - a).detach()
-        normalizer = (ctx.tracker.get_normalizer() - new_norm).detach()
+        normalizer = (ctx.tracker.get_normalizer() - k).detach()
 
         # reconstruct x and populate s with gradient
         with torch.enable_grad(), \
@@ -338,6 +354,10 @@ class RatAttention(BaseAttention):
         return hidden_states.chunk(3, dim=-1)
 
 
+    def get_o(self, hidden_states):
+        return super().get_o(hidden_states), hidden_states
+
+
 class RatMLP(BaseMLP):
 
     def init_mlp_input(self, config):
@@ -356,6 +376,10 @@ class RatMLP(BaseMLP):
         hidden_states = hidden_states.view(bs, l, 2 * self.mlp_size)
 
         return hidden_states.chunk(2, dim=-1)
+
+
+    def get_mlp_output(self, hidden_states):
+        return super().get_mlp_output(hidden_states), hidden_states
 
 
 class RatLayer(nn.Module):
@@ -385,8 +409,8 @@ class RatLayer(nn.Module):
         attn = RatAttention(config, layer_idx)
         mlp = RatMLP(config)
 
-        self.attn_block = Block(config, attn, tracker, 3)
-        self.mlp_block = Block(config, mlp, tracker, 2)
+        self.attn_block = Block(config, attn, tracker, 3, config.hidden_size)
+        self.mlp_block = Block(config, mlp, tracker, 2, config.mlp_size)
 
 
     def forward(
@@ -427,7 +451,7 @@ class RatTransformer(BaseTransformer):
 
 
     def get_extras(self, config):
-        self.main_writer = RatWriter(config)
+        self.main_writer = RatWriter(config, config.hidden_size)
         self.main_reader = RatReader(config, 1)
 
 
@@ -460,7 +484,11 @@ class RatTransformer(BaseTransformer):
         position_ids: Optional[torch.Tensor] = None
     ):
         hidden_states = super().get_hidden_states(input_ids, position_ids)
-        return self.main_writer(hidden_states)
+        return fast_checkpoint(
+            self.main_writer,
+            hidden_states,
+            hidden_states
+        )
 
 
     def get_output(
@@ -486,8 +514,7 @@ class RatTransformer(BaseTransformer):
         # get inputs
         position_ids = self._get_position_ids(input_ids, position_ids)
         attention_mask = self._get_mask(input_ids, segment_ids)
-        hidden_states = self.get_hidden_states(input_ids, position_ids)
-        normalizer = self.main_writer.get_normalizer()
+        hidden_states, normalizer = self.get_hidden_states(input_ids, position_ids)
 
         # start tracking
         self.tracker.clear()
