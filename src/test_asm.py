@@ -10,10 +10,10 @@ from utils.config_utils import load_model_config
 import utils.constants as constants
 
 
-MODEL_CONFIG = 'test-asm'
+MODEL_CONFIG = 'med-asm'
 BASE_CONFIG = 'med-base'
 
-COMPARE = False
+COMPARE = True
 
 
 def main():

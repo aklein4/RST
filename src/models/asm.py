@@ -13,7 +13,7 @@ import numpy as np
 
 class ASMConfig(BaseConfig):
 
-    model_type = 'RST'
+    model_type = 'asm'
 
     def __init__(
         self,
@@ -65,7 +65,7 @@ class ASMWriter(nn.Module):
         hidden_states = hidden_states + k * y_out
         normalizer = normalizer + k
 
-        return torch.stack([hidden_states, normalizer], dim=0)
+        return torch.cat([hidden_states, normalizer], dim=0)
 
 
 class ASMReader(nn.Module):
@@ -82,7 +82,7 @@ class ASMReader(nn.Module):
         hidden_states = hidden_states / (1 + normalizer)
         hidden_states = self.norm(hidden_states)
 
-        return hidden_states
+        return hidden_states.squeeze(0)
 
 
 class ASMAttention(BaseAttention):
@@ -177,13 +177,7 @@ class ASMTransformer(BaseTransformer):
     def get_hidden_states(self, input_ids: torch.LongTensor, position_ids: torch.LongTensor) -> torch.Tensor:
         hidden_states = super().get_hidden_states(input_ids, position_ids)
         return self.emb_writer(
-            torch.stack(
-                [
-                    torch.zeros_like(hidden_states),
-                    torch.zeros_like(hidden_states),
-                ],
-                dim=0
-            ),
+            torch.zeros(2, *hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype),
             hidden_states
         )
 
