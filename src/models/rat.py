@@ -26,17 +26,110 @@ class RatConfig(BaseConfig):
     def __init__(
         self,
         residual_channels: int = 4,
-        normalizer_eps: float = 1e-5,
         bootstrap_debug: bool = False,
         *args,
         **kwargs,
     ):
         
         self.residual_channels = residual_channels
-        self.normalizer_eps = normalizer_eps
         self.bootstrap_debug = bootstrap_debug
 
         super().__init__(*args, **kwargs)
+
+
+class RatReader(nn.Module):
+
+    def special_init_weights(self, config):
+        
+        # init such that r~1 after softplus
+        initer = torch.randn_like(self.q.data) / np.sqrt(config.residual_channels)
+        initer = initer.abs()
+        initer = torch.log(initer.exp() - 1)
+        
+        self.q.data[:] = initer.detach()
+
+
+    def __init__(self, config, num_inputs):
+        super().__init__()
+
+        self.hidden_size = config.hidden_size
+        self.residual_channels = config.residual_channels
+        self.num_inputs = num_inputs
+
+        self.residual_size = self.hidden_size * self.residual_channels
+        self.input_size = self.hidden_size * self.num_inputs
+
+        self.q = nn.Parameter(
+            torch.ones(
+                1, 1,
+                self.hidden_size, self.residual_channels,
+                self.num_inputs
+            )
+        )
+        self.norm = nn.GroupNorm(
+            self.num_inputs,
+            self.input_size,
+            eps=config.layer_norm_eps
+        )
+
+
+    def forward(self, x, normalizer):
+        bs, l, _, c = x.shape
+
+        q_plus = F.softplus(self.q)
+
+        y = (x.unsqueeze(-1) * q_plus).sum(dim=-2)
+        denom = (normalizer.unsqueeze(-1) * q_plus).sum(dim=-2)
+        
+        y = y / (denom + 1)
+
+        assert y.shape == (bs, l, self.hidden_size, self.num_inputs)
+        y = (
+            y
+            .permute(0, 1, 3, 2)
+            .reshape(bs, l, self.input_size)
+        )
+
+        y = y.view(bs*l, self.input_size)
+        y = self.norm(y)
+        y = y.view(bs, l, self.input_size)
+
+        return y
+
+
+class RatWriter(nn.Module):
+
+    def special_init_weights(self, config):
+        
+        initer = torch.randn_like(self.k.data) / np.sqrt(config.residual_channels)
+        initer = initer.abs()
+        initer = torch.log(initer.exp() - 1)
+        
+        self.k.data[:] = initer.detach()
+
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.hidden_size = config.hidden_size
+        self.residual_channels = config.residual_channels
+
+        self.residual_size = self.hidden_size * self.residual_channels
+
+        self.k = nn.Parameter(
+            torch.ones(
+                1, 1,
+                self.hidden_size, self.residual_channels,
+            )
+        )
+
+    
+    def forward(self, x):
+        return x.unsqueeze(-1) * F.softplus(self.k)
+    
+
+    def get_normalizer(self):
+        return F.softplus(self.k)
 
 
 class Tracker(nn.Module):
@@ -91,94 +184,20 @@ class track_fn(torch.autograd.Function):
 class Block(nn.Module):
 
     def special_init_weights(self, config):
-        self.down.weight.data.normal_(
-            0.0, 1 / np.sqrt(config.residual_channels)
-        )
-        self.up.weight.data.normal_(
-            0.0, 1 / np.sqrt(config.residual_channels)
-        )
-
-
-    def post_step(self):
-        self.down.weight.data[:] = (
-            self.down.weight.data /
-            (self.down.weight.data.norm(dim=1, keepdim=True) + self.normalizer_eps)
-        ).detach()
+        self.reader.special_init_weights(config)
+        self.writer.special_init_weights(config)
 
 
     def __init__(self, config, operation, tracker, num_inputs):
         super().__init__()
 
-        self.hidden_size = config.hidden_size
-        self.residual_channels = config.residual_channels
-        self.num_inputs = num_inputs
-
-        self.residual_size = self.hidden_size * self.residual_channels
-        self.input_size = self.hidden_size * self.num_inputs
-
         self.operation = operation
         self.tracker = tracker
 
-        self.normalizer_eps = config.normalizer_eps
-
-        self.down = nn.Conv1d(
-            self.residual_size, self.input_size,
-            kernel_size=1, bias=False,
-            groups=self.hidden_size
-        )
-        self.norm = nn.GroupNorm(
-            self.num_inputs,
-            self.input_size,
-            eps=config.layer_norm_eps
-        )
-        self.up = nn.Conv1d(
-            self.hidden_size, self.residual_size,
-            kernel_size=1, bias=False,
-            groups=self.hidden_size
-        )
+        self.reader = RatReader(config, num_inputs)
+        self.writer = RatWriter(config)
 
         self.debug = False
-
-
-    def get_normalizer(self, ref):
-        ones = torch.ones(1, self.hidden_size, 1, dtype=ref.dtype, device=ref.device)
-        normalizer = self.up(ones)
-        return normalizer
-
-    
-    def read(self, x, normalizer):
-        bs, l, _ = x.shape
-
-        x = x.view(bs*l, self.residual_size, 1)
-        x = self.down(x)
-
-        normalizer = normalizer.view(1, self.residual_size, 1)
-        normalizer = self.down(normalizer)
-        x = x / normalizer
-
-        x = (
-            x
-            .view(bs, l, self.hidden_size, self.num_inputs)
-            .permute(0, 1, 3, 2)
-            .reshape(bs, l, self.input_size)
-        )
-
-        x = x.view(bs*l, self.input_size)
-        x = self.norm(x)
-        x = x.view(bs, l, self.input_size)
-
-        return x
-    
-
-    def write(self, x):
-        bs, l, _ = x.shape
-
-        x = x.view(bs*l, self.hidden_size, 1)
-        x = self.up(x)
-
-        x = x.view(bs, l, self.residual_size)
-
-        return x
 
 
     def compute(self, x, kwargs):
@@ -193,12 +212,12 @@ class Block(nn.Module):
 
     def debug_forward(self, s, normalizer, kwargs):
         
-        x = self.read(s, normalizer)
+        x = self.reader(s, normalizer)
         y = self.compute(x, kwargs)
-        a = self.write(y)
+        a = self.writer(y)
 
         s_new = s + a
-        new_norm = normalizer + self.get_normalizer(s_new)
+        new_norm = normalizer + self.writer.get_normalizer()
 
         return s_new, new_norm
 
@@ -220,7 +239,7 @@ class bootstrap_fn(torch.autograd.Function):
         }
 
         # get x (no grad, s not saved)
-        x = block.read(s, normalizer)
+        x = block.reader(s, normalizer)
         x.requires_grad = True
 
         # get y, and link to x
@@ -228,18 +247,19 @@ class bootstrap_fn(torch.autograd.Function):
             y = block.compute(x, kwargs)
 
         # get a (no grad, doesn't matter we save y anyway)
-        a = block.write(y)
+        a = block.writer(y)
 
         # add residual
         s_new = s + a
 
         # add keys
-        new_norm = normalizer + block.get_normalizer(s)
+        new_norm = normalizer + block.writer.get_normalizer()
 
         # save things
         ctx.save_for_backward(x, y)
         ctx.block = block
         ctx.tracker = tracker
+
         tracker.update(s_new)
         tracker.update_normalizer(new_norm)
 
@@ -267,8 +287,8 @@ class bootstrap_fn(torch.autograd.Function):
         with torch.enable_grad(), \
             torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs), \
             torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):
-                a = ctx.block.write(y)
-                new_norm = ctx.block.get_normalizer(a)
+                a = ctx.block.writer(y)
+                new_norm = ctx.block.writer.get_normalizer()
         torch.autograd.backward(a, grad_output)
         torch.autograd.backward(new_norm, norm_output)
 
@@ -282,7 +302,7 @@ class bootstrap_fn(torch.autograd.Function):
             torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):
                 s.requires_grad = True
                 normalizer.requires_grad = True
-                new_x = ctx.block.read(s, normalizer)
+                new_x = ctx.block.reader(s, normalizer)
         torch.autograd.backward(new_x, x.grad)
 
         # save s for previous block
@@ -294,55 +314,6 @@ class bootstrap_fn(torch.autograd.Function):
         norm_output = norm_output + normalizer.grad
 
         return (grad_output, norm_output) + (None,)*3
-
-
-class RatEmbedding(nn.Module):
-
-    def special_init_weights(self, config):
-        self.up.weight.data.normal_(
-            0.0, 1 / np.sqrt(config.residual_channels)
-        )
-
-
-    def get_normalizer(self, ref):
-        ones = torch.ones(1, self.hidden_size, 1, dtype=ref.dtype, device=ref.device)
-        normalizer = self.up(ones)
-        return normalizer
-
-
-    def __init__(self, num_embeddings, hidden_size, residual_channels, tracker):
-        super().__init__()
-
-        self.num_embeddings = num_embeddings
-        self.hidden_size = hidden_size
-
-        self.residual_channels = residual_channels
-        self.residual_size = hidden_size * residual_channels
-
-        self.tracker = tracker
-
-        self.embedding = nn.Embedding(
-            num_embeddings, hidden_size
-        )
-
-        self.up = nn.Conv1d(
-            self.hidden_size, self.residual_size,
-            kernel_size=1, bias=False,
-            groups=self.hidden_size
-        )
-    
-
-    def forward(self, input_ids):
-        bs, l = input_ids.shape
-
-        out = self.embedding(input_ids)
-
-        out = out.view(bs*l, self.hidden_size, 1)
-        out = self.up(out)
-
-        out = out.view(bs, l, self.residual_size)
-
-        return out
 
 
 class RatAttention(BaseAttention):
@@ -387,7 +358,6 @@ class RatMLP(BaseMLP):
 
 class RatLayer(nn.Module):
 
-
     def special_init_weights(self, config: BaseConfig):
         if config.identity_init:
             raise ValueError("identity_init not supported for RatLayer!")
@@ -397,8 +367,7 @@ class RatLayer(nn.Module):
 
 
     def post_step(self):
-        self.attn_block.post_step()
-        self.mlp_block.post_step()
+        pass
 
 
     def enable_debug(self):
@@ -450,28 +419,21 @@ class RatLayer(nn.Module):
 
 class RatTransformer(BaseTransformer):
     
-    layer_type = RatLayer
+    tracker = Tracker()
+    def layer_type(self, conf, idx):
+        return RatLayer(conf, idx, self.tracker)
 
 
     def get_extras(self, config):
-        self.final_down = nn.Conv1d(
-            self.residual_size, config.hidden_size,
-            kernel_size=1, bias=False,
-            groups=config.hidden_size
-        )
-        self.normalizer_eps = config.normalizer_eps
-
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.main_writer = RatWriter(config)
+        self.main_reader = RatReader(config, 1)
 
 
     def special_init_weights(self, config):
         super().special_init_weights(config)
 
-        self.vocab_embs.special_init_weights(config)
-
-        self.final_down.weight.data.normal_(
-            0.0, 1 / np.sqrt(config.residual_channels)
-        )
+        self.main_writer.special_init_weights(config)
+        self.main_reader.special_init_weights(config)
 
 
     def enable_debug(self):
@@ -479,56 +441,24 @@ class RatTransformer(BaseTransformer):
             layer.enable_debug()
 
 
-    def post_step(self):
-        super().post_step()
-
-        self.final_down.weight.data[:] = (
-            self.final_down.weight.data /
-            (self.final_down.weight.data.norm(dim=1, keepdim=True) + self.normalizer_eps)
-        ).detach()
-
-
     def __init__(self, config: RatConfig):
-        nn.Module.__init__(self)
+        super().__init__(config)
 
-        # info
-        self.vocab_size = config.vocab_size
-        self.max_sequence_length = config.max_sequence_length
-        
-        self.hidden_size = config.hidden_size
-        self.residual_channels = config.residual_channels
-        self.residual_size = self.hidden_size * self.residual_channels
-
-        self.tracker = Tracker()
-
-        # weights
-        self.vocab_embs = RatEmbedding(
-            config.vocab_size, config.hidden_size,
-            config.residual_channels, self.tracker
-        )
-        
-        self.use_rope = config.use_rope
-        if not config.use_rope:
-            raise ValueError("ONLY Rope supported for RatTransformer!")
-        
-        self.layers = nn.ModuleList(
-            [
-                RatLayer(config, i, self.tracker)
-                for i in range(config.num_layers)
-            ]
-        )
-        
-        self.get_extras(config)
-
-        # Compute configuration
-        self.gradient_checkpointing = config.gradient_checkpointing
-        self.gradient_checkpointing_layers = config.gradient_checkpointing_layers
         if self.gradient_checkpointing:
-            raise ValueError("Gradient Checkpointing not supported for RatTransformer!")
+            raise NotImplementedError("Gradient Checkpointing not supported for RatTransformer!")
 
         self.debug = config.bootstrap_debug
         if self.debug:
             self.enable_debug()
+
+
+    def get_hidden_states(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None
+    ):
+        hidden_states = super().get_hidden_states(input_ids, position_ids)
+        return self.main_writer(hidden_states)
 
 
     def get_output(
@@ -536,19 +466,7 @@ class RatTransformer(BaseTransformer):
         hidden_states: torch.Tensor,
         normalizer: torch.Tensor
     ):
-        bs, l, _ = hidden_states.shape
-
-        hidden_states = hidden_states.view(bs*l, self.residual_size, 1)
-        hidden_states = self.final_down(hidden_states)
-
-        normalizer = normalizer.view(1, self.residual_size, 1)
-        normalizer = self.final_down(normalizer)
-        hidden_states = hidden_states / normalizer
-
-        hidden_states = hidden_states.view(bs, l, self.hidden_size)
-        hidden_states = self.norm(hidden_states)
-
-        return hidden_states
+        return self.main_reader(hidden_states, normalizer)
     
 
     def forward(
@@ -563,10 +481,10 @@ class RatTransformer(BaseTransformer):
         position_ids = self._get_position_ids(input_ids, position_ids)
         attention_mask = self._get_mask(input_ids, segment_ids)
         hidden_states = self.get_hidden_states(input_ids, position_ids)
+        normalizer = self.main_writer.get_normalizer()
 
         # start tracking
         self.tracker.clear()
-        normalizer = self.vocab_embs.get_normalizer(hidden_states)
         hidden_states, normalizer = self.tracker(hidden_states, normalizer)
 
         for layer in self.layers:
